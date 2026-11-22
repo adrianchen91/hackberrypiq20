@@ -1,15 +1,180 @@
 #!/bin/sh
+# preinst for hackberrypi-max17048-dkms
+#
+#   new-preinst install [<old-version>]
+#   new-preinst upgrade <old-version>
+#   new-preinst abort-upgrade <new-version>
+#
+# On install/upgrade: refuse (exit 1, before anything is unpacked) when the
+# boot partition is missing or read-only, so dpkg never reaches a postinst
+# that cannot write the overlay.
+#
+# On upgrade: save what an old (<= 1.1) postrm deletes on "postrm upgrade"
+# (dtbo, apt keyring, apt sources) so the new postinst can put it back.
+# The old postrm runs after this script and cannot be changed by us.
 set -e
-CONFIG_TXT="/boot/firmware/config.txt"
-OVERLAY_DIR="/boot/firmware/overlays"
-OVERLAY_NAME="hackberrypicm5.dtbo"
-if [ ! -d $OVERLAY_DIR ]
-then 
-    echo "Missing $OVERLAY_DIR" && exit 1
-fi
 
-if [ ! -f $CONFIG_TXT ]
-then
-    echo "Missing $CONFIG_TXT" && exit 1
+PKG="hackberrypi-max17048-dkms"
+OVL="hackberrypicm5"
+
+# Path overrides are honoured only by the test harness, never in the
+# packaged flow (a stray BOOT_DIR in root's environment must not matter).
+if [ "${HACKBERRYPI_MAINTSCRIPT_TEST:-}" = "1" ]; then
+    HB_BOOT_DIR="${BOOT_DIR:-/boot/firmware}"
+    HB_KEYRING="${KEYRING:-/usr/share/keyrings/hackberrypi-max17048.gpg}"
+    HB_SOURCES_LIST="${SOURCES_LIST:-/etc/apt/sources.list.d/hackberrypi-max17048.sources}"
+    HB_STATE_DIR="${STATE_DIR:-/var/lib/hackberrypi-max17048-dkms}"
+else
+    HB_BOOT_DIR="/boot/firmware"
+    HB_KEYRING="/usr/share/keyrings/hackberrypi-max17048.gpg"
+    HB_SOURCES_LIST="/etc/apt/sources.list.d/hackberrypi-max17048.sources"
+    HB_STATE_DIR="/var/lib/hackberrypi-max17048-dkms"
 fi
+HB_CONFIG="$HB_BOOT_DIR/config.txt"
+HB_OVERLAY_DIR="$HB_BOOT_DIR/overlays"
+HB_DTBO="$HB_OVERLAY_DIR/$OVL.dtbo"
+HB_PREV="$HB_DTBO.prev"
+# First release whose postrm leaves everything in place on "upgrade". Older
+# postrms (<= 1.1, also 1.1-1 etc.) delete the dtbo, the config line and the
+# apt keyring/sources, so upgrades from them need the extra state below.
+HB_FIXED_VERSION="1.2~"
+
+say() { printf '%s: %s\n' "$PKG" "$*"; }
+fail() {
+    printf '%s: ERROR: %s\n' "$PKG" "$*" >&2
+    printf '%s: nothing has been changed. Mount the boot partition read-write at %s and retry.\n' \
+        "$PKG" "$HB_BOOT_DIR" >&2
+    exit 1
+}
+
+# Can we create (and remove) a file in directory $1?
+dir_writable() {
+    hb_probe="$1/.hackberrypi-wtest.$$"
+    if ( : > "$hb_probe" ) 2>/dev/null; then
+        rm -f "$hb_probe"
+        return 0
+    fi
+    return 1
+}
+
+check_boot() {
+    [ -d "$HB_BOOT_DIR" ] || fail "$HB_BOOT_DIR does not exist (boot partition not mounted?)"
+    [ -d "$HB_OVERLAY_DIR" ] || fail "missing $HB_OVERLAY_DIR (boot partition not mounted?)"
+    [ -f "$HB_CONFIG" ] || fail "missing $HB_CONFIG (boot partition not mounted?)"
+    [ -w "$HB_CONFIG" ] || fail "$HB_CONFIG is not writable"
+    dir_writable "$HB_OVERLAY_DIR" || fail "$HB_OVERLAY_DIR is not writable (read-only mount?)"
+    dir_writable "$HB_BOOT_DIR" || fail "$HB_BOOT_DIR is not writable (read-only mount?)"
+}
+
+# Does config.txt enable our overlay on an active (uncommented) line?
+# (bare line, or the name followed by parameters, a comment or blanks)
+overlay_enabled() {
+    awk -v ovl="$OVL" '
+        {
+            t = $0
+            sub(/\r$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+            l = "dtoverlay=" ovl
+            if (index(t, l) == 1) {
+                c = substr(t, length(l) + 1, 1)
+                if (c == "" || c == "," || c == ":" || c == "." || c == " " || c == "\t" || c == "#")
+                    found = 1
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$HB_CONFIG"
+}
+
+# Is there a bare "dtoverlay=hackberrypicm5" line, exactly the pattern the
+# <= 1.1 postrm deletes with sed?
+has_legacy_line() {
+    grep -qx "dtoverlay=$OVL" "$HB_CONFIG"
+}
+
+# Copy $1 to $2 through a temp file next to $2, then rename.
+safe_copy() {
+    cp -p "$1" "$2.tmp" || { rm -f "$2.tmp"; return 1; }
+    sync
+    mv -f "$2.tmp" "$2" || { rm -f "$2.tmp"; return 1; }
+    return 0
+}
+
+# Is the old version's postrm one that deletes things on "upgrade"?
+from_destructive_version() {
+    [ -n "$1" ] || return 1
+    dpkg --compare-versions "$1" lt "$HB_FIXED_VERSION"
+}
+
+drop_overlay_state() {
+    rm -f "$HB_STATE_DIR/overlay-enabled" "$HB_STATE_DIR/config.pre" 2>/dev/null ||
+        say "WARNING: could not remove stale state in $HB_STATE_DIR"
+    rmdir "$HB_STATE_DIR" 2>/dev/null || true
+    return 0
+}
+
+save_state_for_upgrade() { # save_state_for_upgrade <old-version>
+    # 1. Previous good dtbo: an old postrm deletes the dtbo on "upgrade".
+    #    Keep a copy as .prev on the boot partition. Failure is fatal: we
+    #    are still before unpack, so aborting here changes nothing.
+    if [ -f "$HB_DTBO" ] && [ -s "$HB_DTBO" ]; then
+        if ! cmp -s "$HB_DTBO" "$HB_PREV" 2>/dev/null; then
+            safe_copy "$HB_DTBO" "$HB_PREV" || fail "could not back up $HB_DTBO to $HB_PREV"
+        fi
+        say "saved current overlay as $HB_PREV"
+    fi
+
+    # 2. apt keyring/sources, whether the overlay is enabled, and config.txt
+    #    as it is now (the old postrm deletes the bare dtoverlay line; postinst
+    #    puts it back at the same position, with the dtparam lines after it).
+    #    Never delete or overwrite a saved copy whose source is gone: this
+    #    script can run again (reinstall before configure) after the old
+    #    postrm already removed the originals. Failures only warn: none of
+    #    this is boot-critical.
+    if mkdir -p "$HB_STATE_DIR" 2>/dev/null; then
+        if [ -f "$HB_KEYRING" ]; then
+            cp -p "$HB_KEYRING" "$HB_STATE_DIR/keyring" ||
+                say "WARNING: could not save $HB_KEYRING"
+        fi
+        if [ -f "$HB_SOURCES_LIST" ]; then
+            cp -p "$HB_SOURCES_LIST" "$HB_STATE_DIR/sources" ||
+                say "WARNING: could not save $HB_SOURCES_LIST"
+        fi
+        if from_destructive_version "$1"; then
+            if overlay_enabled; then
+                ( : > "$HB_STATE_DIR/overlay-enabled" ) 2>/dev/null ||
+                    say "WARNING: could not record overlay state"
+            fi
+            if has_legacy_line; then
+                cp -p "$HB_CONFIG" "$HB_STATE_DIR/config.pre" ||
+                    say "WARNING: could not save a copy of $HB_CONFIG"
+            fi
+        else
+            # The old postrm keeps everything: drop stale state from an
+            # earlier, unfinished upgrade so it cannot be applied later.
+            drop_overlay_state
+        fi
+    else
+        say "WARNING: could not create $HB_STATE_DIR; apt keyring/sources not saved"
+    fi
+}
+
+case "$1" in
+    install)
+        check_boot
+        ;;
+    upgrade)
+        check_boot
+        save_state_for_upgrade "${2:-}"
+        ;;
+    abort-upgrade)
+        # The old package stays installed; the overlay state is only for the
+        # new postinst. Saved keyring/sources copies are kept: the old postrm
+        # may already have deleted the originals.
+        drop_overlay_state
+        ;;
+    *)
+        ;;
+esac
+
+#DEBHELPER#
+
 exit 0

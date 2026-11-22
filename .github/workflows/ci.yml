@@ -1,0 +1,66 @@
+name: CI
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Fetch code
+        uses: actions/checkout@v6
+
+      - name: Shell syntax check
+        # Scripts are checked with the interpreter named in their shebang.
+        run: |
+          status=0
+          for f in tools/*.sh debian/*.preinst debian/*.postinst debian/*.prerm debian/*.postrm; do
+            [ -f "$f" ] || continue
+            case "$(head -n1 "$f")" in
+              *bash*) interp=bash ;;
+              *)      interp=sh ;;
+            esac
+            echo "$interp -n $f"
+            "$interp" -n "$f" || status=1
+          done
+          exit "$status"
+
+      - name: Install PyYAML
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+
+      - name: Validate workflow YAML
+        run: |
+          for f in .github/workflows/*.yml; do
+            python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1])); print("ok", sys.argv[1])' "$f"
+          done
+
+  build-module:
+    # Best-effort: the runner's linux-headers-generic packages are Ubuntu
+    # kernels, not raspberrypi/linux 6.12. The build catches compile errors
+    # against a recent arm64 kernel API; it does not prove ABI compatibility
+    # with the Raspberry Pi kernel. Use the rpi-6.12 headers for that check.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Fetch code
+        uses: actions/checkout@v6
+
+      - name: Install kernel headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential linux-headers-generic
+
+      - name: Build module
+        run: |
+          KDIR="$(find /usr/src -maxdepth 1 -name 'linux-headers-*' -type d | sort -V | tail -n1)"
+          echo "KDIR=$KDIR"
+          test -n "$KDIR" || { echo "::error::no kernel headers found"; exit 1; }
+          make KDIR="$KDIR"

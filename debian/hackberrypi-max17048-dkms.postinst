@@ -1,17 +1,663 @@
 #!/bin/sh
+# postinst for hackberrypi-max17048-dkms
+#
+#   postinst configure [<most-recently-configured-version>]
+#   old-postinst abort-upgrade <new-version>
+#   conflictor's-postinst abort-remove in-favour <package> <new-version>
+#   postinst abort-remove
+#   deconfigured's-postinst abort-deconfigure in-favour <failed-pkg> ...
+#
+# configure installs the device-tree overlay and enables it in config.txt.
+# A black screen is the failure to avoid, so:
+#   * the dtbo is compiled (dtc -@) to a temp file on the boot partition,
+#     validated (dtmerge against the base dtb when possible) and renamed into
+#     place; the previous dtbo is kept as <name>.dtbo.prev;
+#   * config.txt is only edited inside a marker block, in unconditional
+#     ([all]) scope, through temp file + sync + rename, after a backup;
+#   * any failure leaves the previous dtbo and config.txt as they were and
+#     exits 0 with a loud warning (no half state, apt is not broken);
+#   * config.txt never ends up referencing a dtbo that does not exist, and a
+#     validated dtbo is never deleted while the overlay was meant to be on.
+# The overlay work runs before the DKMS snippet (#DEBHELPER#), so a module
+# build failure cannot prevent the overlay from being installed.
+#
+# The managed block in config.txt looks like this:
+#
+#   # BEGIN hackberrypi (managed)
+#   [all]                          <- only when the file did not end in [all]
+#   dtoverlay=hackberrypicm5
+#   dtparam=touch_inv_x            <- overlay parameters: put them HERE,
+#   dtparam=pclk=35000000             after the dtoverlay line, inside the
+#   # END hackberrypi                 block; they are kept on every rebuild
+#
+# dtparam= and comment lines inside the block are preserved. Parameters of
+# this overlay written elsewhere bind to whatever overlay precedes them, so
+# they are reported as a warning. A legacy bare "dtoverlay=hackberrypicm5"
+# line (written by <= 1.1) is wrapped in markers where it stands, together
+# with the dtparam lines of ours that directly follow it.
+#
+# Known limitation: on an upgrade from <= 1.1 where config.txt was changed
+# between preinst and postinst (anything beyond the old postrm's sed), the
+# saved parameter lines are re-added inside the block but the originals are
+# left where they are, so they appear twice; the outside copies are reported
+# by the "parameters outside the block" warning. dpkg itself never edits
+# config.txt in between, so this needs manual edits during the upgrade.
 set -e
-OVERLAY_DIR="/boot/firmware/overlays"
-OVERLAY_NAME="hackberrypicm5.dtbo"
-DT_NAME="hackberrypicm5"
-CONFIG_TXT="/boot/firmware/config.txt"
+
+PKG="hackberrypi-max17048-dkms"
+OVL="hackberrypicm5"
+BEGIN_MARK="# BEGIN hackberrypi (managed)"
+END_MARK="# END hackberrypi"
+# Parameter names of the overlay (__overrides__ in hackberrypicm5.dts).
+OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us"
+
+# Path overrides are honoured only by the test harness, never in the
+# packaged flow (a stray BOOT_DIR in root's environment must not matter).
+if [ "${HACKBERRYPI_MAINTSCRIPT_TEST:-}" = "1" ]; then
+    HB_BOOT_DIR="${BOOT_DIR:-/boot/firmware}"
+    HB_KEYRING="${KEYRING:-/usr/share/keyrings/hackberrypi-max17048.gpg}"
+    HB_SOURCES_LIST="${SOURCES_LIST:-/etc/apt/sources.list.d/hackberrypi-max17048.sources}"
+    HB_STATE_DIR="${STATE_DIR:-/var/lib/hackberrypi-max17048-dkms}"
+    HB_SRC_DIR="${SRC_DIR:-}"
+else
+    HB_BOOT_DIR="/boot/firmware"
+    HB_KEYRING="/usr/share/keyrings/hackberrypi-max17048.gpg"
+    HB_SOURCES_LIST="/etc/apt/sources.list.d/hackberrypi-max17048.sources"
+    HB_STATE_DIR="/var/lib/hackberrypi-max17048-dkms"
+    HB_SRC_DIR=""
+fi
+HB_CONFIG="$HB_BOOT_DIR/config.txt"
+HB_CONFIG_TMP="$HB_BOOT_DIR/config.txt.hackberrypi.tmp"
+HB_CONFIG_BAK="$HB_BOOT_DIR/config.txt.hackberrypi.bak"
+HB_CONFIG_ORIG="$HB_BOOT_DIR/config.txt.hackberrypi.orig"
+HB_OVERLAY_DIR="$HB_BOOT_DIR/overlays"
+HB_DTBO="$HB_OVERLAY_DIR/$OVL.dtbo"
+HB_DTBO_TMP="$HB_DTBO.tmp"
+HB_PREV="$HB_DTBO.prev"
+HB_BASE_DTB="$HB_BOOT_DIR/bcm2712-rpi-cm5-cm5io.dtb"
+HB_PRE_CONFIG="$HB_STATE_DIR/config.pre"
+HB_ENABLED_FLAG="$HB_STATE_DIR/overlay-enabled"
+HB_WORK=""
+HB_CONFIG_OK=0
+HB_SRC_CONFIG="$HB_CONFIG"
+HB_EXTRA_PARAMS=""
+
+say() { printf '%s: %s\n' "$PKG" "$*"; }
+warn() { printf '%s: WARNING: %s\n' "$PKG" "$*" >&2; }
+loud() {
+    printf '\n%s\n' "**********************************************************************" >&2
+    for hb_l in "$@"; do
+        printf '%s: %s\n' "$PKG" "$hb_l" >&2
+    done
+    printf '%s\n\n' "**********************************************************************" >&2
+}
+
+hb_cleanup() {
+    rm -f "$HB_DTBO_TMP" "$HB_PREV.tmp" "$HB_CONFIG_TMP" "$HB_CONFIG_TMP.1" "$HB_CONFIG_TMP.2" \
+        "$HB_CONFIG_BAK.tmp" "$HB_CONFIG_ORIG.tmp" 2>/dev/null || true
+    if [ -n "$HB_WORK" ]; then
+        rm -rf "$HB_WORK" 2>/dev/null || true
+        HB_WORK=""
+    fi
+}
+
+dir_writable() {
+    hb_probe="$1/.hackberrypi-wtest.$$"
+    if ( : > "$hb_probe" ) 2>/dev/null; then
+        rm -f "$hb_probe"
+        return 0
+    fi
+    return 1
+}
+
+# Copy $1 to $2 through a temp file next to $2, then rename.
+safe_copy() {
+    cp -p "$1" "$2.tmp" || { rm -f "$2.tmp"; return 1; }
+    sync
+    mv -f "$2.tmp" "$2" || { rm -f "$2.tmp"; return 1; }
+    return 0
+}
+
+# ---------------------------------------------------------------- config.txt
+#
+# One awk program (identical copy in postrm), selected by -v mode=:
+#   check:   print key=value facts about the file
+#   strip:   the file without our block(s) and without legacy bare
+#            "dtoverlay=hackberrypicm5" lines (plus the dtparam lines of ours
+#            that directly follow such a line). Every other line is printed
+#            byte-for-byte. If a removed block carried its own "[all]" and
+#            real settings follow it, a bare "[all]" is kept so they stay
+#            unconditional.
+#   params:  the dtparam/comment lines inside our block(s), and the dtparam
+#            lines of ours that directly follow a legacy line, in order
+#   wrap:    the file with the (single) legacy line and its directly
+#            following dtparam lines of ours wrapped in markers in place
+#   orphans: dtparam lines outside the block that use our parameter names
+# Section scope: no header or "[all]" = unconditional; any other filter is
+# conditional. An "include" after the last [all] makes the scope unknown.
+HB_AWK='
+function trim(s) { sub(/\r$/, "", s); sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+function isuserref(t,   c) {
+    if (index(t, ovlline) != 1 || length(t) == length(ovlline)) return 0
+    c = substr(t, length(ovlline) + 1, 1)
+    return (c == "," || c == ":" || c == "." || c == " " || c == "\t" || c == "#")
+}
+function ourkeys(t, all,   n, a, i, k, hit) {
+    if (index(t, "dtparam=") != 1) return 0
+    n = split(substr(t, 9), a, ","); hit = 0
+    for (i = 1; i <= n; i++) {
+        k = a[i]; sub(/=.*/, "", k)
+        if (k in ours) hit++
+        else if (all) return 0
+    }
+    return hit > 0
+}
+BEGIN {
+    ovlline = "dtoverlay=" ovl
+    np = split(params, pl, " "); for (i = 1; i <= np; i++) ours[pl[i]] = 1
+    sall = 1; inc = 0; inblk = 0; nblk = 0; good = 0; bad = 0; legacy = 0; userref = 0
+    pend = 0; follow = 0; orphans = 0; lsall = 0; linc = 1; other = 0
+}
+{
+    raw = $0; t = trim(raw)
+    if (t == bm) {
+        if (inblk) bad = 1
+        if (follow) { follow = 0; if (mode == "wrap") print em }
+        inblk = 1; nblk++; bgood = 1; bovl = 0; ball = 0
+        next
+    }
+    if (t == em) {
+        if (!inblk) { bad = 1; if (mode == "strip" || mode == "wrap") print raw; next }
+        inblk = 0
+        if (bgood && bovl == 1) good++
+        if (ball) pend = 1
+        next
+    }
+    ishdr = 0
+    if (substr(t, 1, 1) == "[" && index(t, "]") > 1) {
+        ishdr = 1; f = tolower(substr(t, 2, index(t, "]") - 2)); sall = (f == "all"); inc = 0
+    } else if (t ~ /^include([ \t]|$)/) {
+        inc = 1
+    }
+    if (inblk) {
+        if (t == ovlline) { bovl++; if (!sall || inc) bgood = 0 }
+        else if (ishdr && f == "all") { ball = 1; if (bovl) bgood = 0 }
+        else if (index(t, "dtparam=") == 1) { if (!bovl) bgood = 0; if (mode == "params") print raw }
+        else if (substr(t, 1, 1) == "#") { if (mode == "params") print raw }
+        else if (t != "") { bgood = 0; other++ }
+        next
+    }
+    if (follow) {
+        if (ourkeys(t, 1)) {
+            if (mode == "params" || mode == "wrap") print raw
+            next
+        }
+        follow = 0
+        if (mode == "wrap") print em
+    }
+    if (t == ovlline) {
+        legacy++; follow = 1
+        if (legacy == 1) { lsall = sall; linc = inc }
+        if (mode == "wrap") { print bm; print raw }
+        next
+    }
+    if (isuserref(t)) userref++
+    if (ourkeys(t, 0)) { orphans++; if (mode == "orphans") print "line " NR ": " t }
+    if (pend && t != "" && substr(t, 1, 1) != "#") {
+        if (!ishdr && mode == "strip") print "[all]"
+        pend = 0
+    }
+    if (mode == "strip" || mode == "wrap") print raw
+}
+END {
+    if (follow && mode == "wrap") print em
+    if (inblk) bad = 1
+    if (mode == "check")
+        printf "bad=%d blocks=%d good=%d legacy=%d userref=%d endall=%d inplace=%d orphans=%d other=%d\n", bad, nblk, good, legacy, userref, (sall && !inc), (legacy == 1 && nblk == 0 && lsall && !linc), orphans, other
+}'
+
+hb_awk() { # hb_awk <mode> <file>
+    awk -v mode="$1" -v ovl="$OVL" -v bm="$BEGIN_MARK" -v em="$END_MARK" -v params="$OVL_PARAMS" "$HB_AWK" "$2"
+}
+
+# Pull one field out of check output: cfg_field <facts> <name>
+cfg_field() {
+    hb_v="$(printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -n 1)"
+    printf '%s\n' "${hb_v:-0}"
+}
+
+# Does config.txt load our overlay on any active line?
+config_refs_overlay() {
+    hb_f="$(hb_awk check "$HB_CONFIG" 2>/dev/null)" || return 0
+    [ "$(cfg_field "$hb_f" blocks)" != 0 ] || [ "$(cfg_field "$hb_f" legacy)" != 0 ] ||
+        [ "$(cfg_field "$hb_f" userref)" != 0 ] || [ "$(cfg_field "$hb_f" bad)" != 0 ]
+}
+
+backup_config() {
+    if [ ! -e "$HB_CONFIG_ORIG" ]; then
+        # The first-ever copy: before an upgrade from <= 1.1 that is the
+        # config.txt preinst saw, not the one the old postrm already edited.
+        hb_first="$HB_CONFIG"
+        [ "$HB_SRC_CONFIG" != "$HB_CONFIG" ] && hb_first="$HB_SRC_CONFIG"
+        safe_copy "$hb_first" "$HB_CONFIG_ORIG" || return 1
+        say "saved first-ever copy of config.txt as $HB_CONFIG_ORIG"
+    fi
+    safe_copy "$HB_CONFIG" "$HB_CONFIG_BAK" || return 1
+    say "backed up config.txt to $HB_CONFIG_BAK"
+    return 0
+}
+
+# Pick the file to start from. On an upgrade from <= 1.1 the old postrm has
+# just deleted the bare dtoverlay line with sed; if config.txt is exactly
+# what that sed made of the copy preinst saved, start from the saved copy so
+# the line (and its dtparam lines) is wrapped where it stood. Otherwise use
+# config.txt and remember the saved parameter lines to re-add in the block.
+choose_source() {
+    HB_SRC_CONFIG="$HB_CONFIG"
+    HB_EXTRA_PARAMS=""
+    [ -f "$HB_PRE_CONFIG" ] || return 0
+    if cmp -s "$HB_PRE_CONFIG" "$HB_CONFIG"; then
+        return 0
+    fi
+    if sed "\\|^dtoverlay=$OVL\$|d" "$HB_PRE_CONFIG" | cmp -s - "$HB_CONFIG"; then
+        HB_SRC_CONFIG="$HB_PRE_CONFIG"
+        say "restoring dtoverlay=$OVL at its pre-upgrade position"
+        return 0
+    fi
+    HB_EXTRA_PARAMS="$(hb_awk params "$HB_PRE_CONFIG" 2>/dev/null)" || HB_EXTRA_PARAMS=""
+    if [ -n "$HB_EXTRA_PARAMS" ]; then
+        warn "config.txt changed during the upgrade; re-adding the saved overlay parameters in the block"
+    fi
+}
+
+# Make config.txt contain exactly one managed block, in unconditional scope.
+# Returns 0 when config.txt is in the desired state (changed or not),
+# 1 when it was left untouched because of an error or an ambiguity.
+ensure_config_block() {
+    choose_source
+    hb_facts="$(hb_awk check "$HB_SRC_CONFIG")" || { warn "could not parse $HB_SRC_CONFIG"; return 1; }
+    if [ "$(cfg_field "$hb_facts" bad)" != 0 ]; then
+        warn "unbalanced '$BEGIN_MARK' / '$END_MARK' markers in $HB_CONFIG; not editing it"
+        return 1
+    fi
+    if [ "$(cfg_field "$hb_facts" userref)" != 0 ]; then
+        warn "$HB_CONFIG already loads $OVL on a line this package did not write;"
+        warn "leaving config.txt alone so the overlay is not loaded twice"
+        return 0
+    fi
+    if [ "$(cfg_field "$hb_facts" other)" != 0 ]; then
+        warn "the '$BEGIN_MARK' block in $HB_CONFIG contains lines other than"
+        warn "dtoverlay=$OVL, dtparam= and comments; leaving config.txt alone so they are not lost."
+        warn "Move those lines out of the block (keep it to dtoverlay/dtparam lines) and run:"
+        warn "  dpkg-reconfigure $PKG"
+        return 0
+    fi
+    if [ "$HB_SRC_CONFIG" = "$HB_CONFIG" ] && [ "$(cfg_field "$hb_facts" blocks)" = 1 ] &&
+        [ "$(cfg_field "$hb_facts" good)" = 1 ] && [ "$(cfg_field "$hb_facts" legacy)" = 0 ]; then
+        say "overlay already enabled in $HB_CONFIG"
+        return 0
+    fi
+
+    if [ "$(cfg_field "$hb_facts" inplace)" = 1 ] && [ -z "$HB_EXTRA_PARAMS" ]; then
+        # Legacy line in unconditional scope: wrap it where it stands, so
+        # the dtparam lines after it keep binding to it.
+        hb_awk wrap "$HB_SRC_CONFIG" > "$HB_CONFIG_TMP" || { warn "could not write $HB_CONFIG_TMP"; return 1; }
+    else
+        hb_awk params "$HB_SRC_CONFIG" > "$HB_CONFIG_TMP.2" || { warn "could not write $HB_CONFIG_TMP.2"; return 1; }
+        if [ -n "$HB_EXTRA_PARAMS" ]; then
+            printf '%s\n' "$HB_EXTRA_PARAMS" >> "$HB_CONFIG_TMP.2" || return 1
+        fi
+        hb_awk strip "$HB_SRC_CONFIG" > "$HB_CONFIG_TMP.1" || { warn "could not write $HB_CONFIG_TMP.1"; return 1; }
+        hb_sfacts="$(hb_awk check "$HB_CONFIG_TMP.1")" || return 1
+        {
+            cat "$HB_CONFIG_TMP.1"
+            printf '%s\n' "$BEGIN_MARK"
+            if [ "$(cfg_field "$hb_sfacts" endall)" != 1 ]; then
+                printf '[all]\n'
+            fi
+            printf 'dtoverlay=%s\n' "$OVL"
+            cat "$HB_CONFIG_TMP.2"
+            printf '%s\n' "$END_MARK"
+        } > "$HB_CONFIG_TMP" || { warn "could not write $HB_CONFIG_TMP"; return 1; }
+        rm -f "$HB_CONFIG_TMP.1" "$HB_CONFIG_TMP.2"
+    fi
+
+    # Verify the result before it replaces config.txt.
+    hb_nfacts="$(hb_awk check "$HB_CONFIG_TMP")" || return 1
+    if [ "$(cfg_field "$hb_nfacts" bad)" != 0 ] || [ "$(cfg_field "$hb_nfacts" blocks)" != 1 ] ||
+        [ "$(cfg_field "$hb_nfacts" good)" != 1 ] || [ "$(cfg_field "$hb_nfacts" legacy)" != 0 ] ||
+        [ "$(cfg_field "$hb_nfacts" userref)" != 0 ] || [ "$(cfg_field "$hb_nfacts" other)" != 0 ]; then
+        warn "internal error: generated config.txt failed verification ($hb_nfacts)"
+        return 1
+    fi
+
+    backup_config || { warn "could not back up $HB_CONFIG"; return 1; }
+    sync
+    mv -f "$HB_CONFIG_TMP" "$HB_CONFIG" || { warn "could not replace $HB_CONFIG"; return 1; }
+    sync
+    say "enabled $OVL in $HB_CONFIG (managed block, unconditional scope)"
+    return 0
+}
+
+# -------------------------------------------------------- conflict warnings
+# Warn (never edit) about lines that claim the DPI pins (GPIO0-9, 12-17,
+# 20-25) or our I2C bus (GPIO10/11).
+warn_conflicts() {
+    awk -v ovl="$OVL" '
+    function trim(s) { sub(/\r$/, "", s); sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function dpi(n) { return (n >= 0 && n <= 9) || (n >= 12 && n <= 17) || (n >= 20 && n <= 25) }
+    function ison(v) { v = tolower(v); return v == "" || v == "on" || v == "true" || v == "yes" || v == "1" || v == "okay" }
+    BEGIN { sect = "all" }
+    {
+        t = trim($0)
+        if (t == "" || substr(t, 1, 1) == "#") next
+        if (substr(t, 1, 1) == "[" && index(t, "]") > 1) { sect = substr(t, 2, index(t, "]") - 2); next }
+        where = "line " NR " [" sect "]: " t
+        if (index(t, "dtoverlay=") == 1) {
+            n = split(substr(t, 11), a, ","); name = a[1]; sub(/:.*/, "", name)
+            if (name == "i2c-gpio") {
+                sda = 23; scl = 24
+                for (i = 2; i <= n; i++) {
+                    if (index(a[i], "i2c_gpio_sda=") == 1) sda = substr(a[i], 14) + 0
+                    if (index(a[i], "i2c_gpio_scl=") == 1) scl = substr(a[i], 14) + 0
+                }
+                if (dpi(sda) || dpi(scl))
+                    print where " -> i2c-gpio on GPIO" sda "/" scl " uses DPI display pins"
+                else if (sda == 10 || sda == 11 || scl == 10 || scl == 11)
+                    print where " -> i2c-gpio on GPIO" sda "/" scl " clashes with the " ovl " I2C bus (GPIO10/11)"
+            } else if (name ~ /^spi/) {
+                print where " -> SPI overlays claim GPIOs that the DPI display (or the GPIO10/11 bus) uses"
+            }
+        } else if (index(t, "dtparam=") == 1) {
+            n = split(substr(t, 9), a, ",")
+            for (i = 1; i <= n; i++) {
+                k = a[i]; v = ""
+                j = index(k, "=")
+                if (j > 0) { v = substr(k, j + 1); k = substr(k, 1, j - 1) }
+                if ((k == "i2c_arm" || k == "i2c" || k == "i2c1") && ison(v))
+                    print where " -> i2c_arm (I2C1) uses GPIO2/3, which are DPI display pins"
+                if ((k == "i2c_vc" || k == "i2c0") && ison(v))
+                    print where " -> i2c_vc (I2C0) uses GPIO0/1, which are DPI display pins"
+                if (k == "spi" && ison(v))
+                    print where " -> spi (SPI0) uses GPIO7-11: DPI display pins and the GPIO10/11 bus"
+            }
+        }
+    }' "$HB_CONFIG"
+}
+
+# Our parameter names used outside the managed block bind to the wrong
+# overlay (or the base dt). Warn, never move them.
+warn_orphan_params() {
+    hb_orph="$(hb_awk orphans "$HB_CONFIG" 2>/dev/null)" || hb_orph=""
+    [ -n "$hb_orph" ] || return 0
+    warn "config.txt sets $OVL parameters outside the '$BEGIN_MARK' block."
+    warn "dtparam= applies to the overlay loaded just before it, so these do NOT reach"
+    warn "$OVL. Move them inside the block, after 'dtoverlay=$OVL':"
+    printf '%s\n' "$hb_orph" | sed 's/^/    /' >&2
+}
+
+# ------------------------------------------------------------------ overlay
+
+find_dts() {
+    if [ -n "$HB_SRC_DIR" ]; then
+        printf '%s\n' "$HB_SRC_DIR/$OVL.dts"
+        return 0
+    fi
+    # The file this very package version ships (dh_dkms installs it under
+    # /usr/src/<name>-<upstream version>/).
+    hb_dts="$(dpkg-query -L "$PKG" 2>/dev/null | grep "/$OVL\.dts\$" | head -n 1)" || hb_dts=""
+    if [ -z "$hb_dts" ]; then
+        hb_ver="$(dpkg-query -W -f='${Version}' "$PKG" 2>/dev/null)" || hb_ver=""
+        hb_ver="${hb_ver#*:}"
+        hb_ver="${hb_ver%%-*}"
+        hb_dts="/usr/src/hackberrypi-max17048-$hb_ver/$OVL.dts"
+    fi
+    printf '%s\n' "$hb_dts"
+}
+
+# Compile and validate into $HB_DTBO_TMP. Never touches $HB_DTBO.
+# Compiled with -@ exactly like tools/validate-overlay.sh, so the blob that
+# is installed is the one that was validated.
+build_dtbo() {
+    hb_dts="$(find_dts)"
+    if [ ! -f "$hb_dts" ]; then
+        warn "overlay source $hb_dts not found"
+        return 1
+    fi
+    if ! command -v dtc > /dev/null 2>&1; then
+        warn "dtc (device-tree-compiler) not found"
+        return 1
+    fi
+    rm -f "$HB_DTBO_TMP"
+    if ! dtc -@ -q -I dts -O dtb -o "$HB_DTBO_TMP" "$hb_dts"; then
+        warn "dtc failed to compile $hb_dts"
+        rm -f "$HB_DTBO_TMP"
+        return 1
+    fi
+    if [ ! -s "$HB_DTBO_TMP" ]; then
+        warn "dtc produced an empty overlay"
+        rm -f "$HB_DTBO_TMP"
+        return 1
+    fi
+    # Round trip: the blob must at least parse.
+    if ! dtc -q -I dtb -O dts -o /dev/null "$HB_DTBO_TMP"; then
+        warn "compiled overlay does not parse back"
+        rm -f "$HB_DTBO_TMP"
+        return 1
+    fi
+    if command -v dtmerge > /dev/null 2>&1 && [ -f "$HB_BASE_DTB" ]; then
+        HB_WORK="$(mktemp -d "${TMPDIR:-/tmp}/hackberrypi.XXXXXX")" || { warn "mktemp failed"; return 1; }
+        # dtmerge rejects overlay paths of about 256 characters or more
+        # ("overlay filename too long"): fall back to /tmp for a long TMPDIR.
+        if [ "${#HB_WORK}" -gt 180 ]; then
+            rm -rf "$HB_WORK"
+            HB_WORK="$(mktemp -d /tmp/hackberrypi.XXXXXX)" || { HB_WORK=""; warn "mktemp failed"; return 1; }
+        fi
+        # dtmerge appends ".dtbo" to an overlay path lacking it: validate a
+        # copy with the right suffix.
+        if ! cp "$HB_DTBO_TMP" "$HB_WORK/$OVL.dtbo"; then
+            warn "could not copy overlay for validation"
+            rm -f "$HB_DTBO_TMP"
+            return 1
+        fi
+        if ! dtmerge "$HB_BASE_DTB" "$HB_WORK/merged.dtb" "$HB_WORK/$OVL.dtbo" > "$HB_WORK/dtmerge.log" 2>&1 ||
+            [ ! -s "$HB_WORK/merged.dtb" ]; then
+            warn "dtmerge could not apply the new overlay to $HB_BASE_DTB:"
+            sed 's/^/    /' "$HB_WORK/dtmerge.log" >&2 || true
+            rm -f "$HB_DTBO_TMP"
+            return 1
+        fi
+        say "validated overlay against $HB_BASE_DTB with dtmerge"
+    else
+        say "note: dtmerge or $HB_BASE_DTB not available, skipped merge validation (install raspi-utils-dt)"
+    fi
+    return 0
+}
+
+# Put $HB_DTBO_TMP in place, keeping the old dtbo as .prev.
+# Sets HB_INSTALLED=1 and HB_HAD_OLD=1|0.
+install_dtbo() {
+    HB_INSTALLED=0
+    HB_HAD_OLD=0
+    if [ -f "$HB_DTBO" ]; then
+        HB_HAD_OLD=1
+        if cmp -s "$HB_DTBO_TMP" "$HB_DTBO"; then
+            rm -f "$HB_DTBO_TMP"
+            say "overlay $HB_DTBO is already up to date"
+            return 0
+        fi
+        safe_copy "$HB_DTBO" "$HB_PREV" || { warn "could not back up $HB_DTBO to $HB_PREV"; return 1; }
+        say "previous overlay kept as $HB_PREV"
+    fi
+    sync
+    mv -f "$HB_DTBO_TMP" "$HB_DTBO" || { warn "could not move new overlay into place"; return 1; }
+    sync
+    HB_INSTALLED=1
+    say "installed overlay $HB_DTBO"
+    return 0
+}
+
+# Undo install_dtbo after a later failure: put the previous dtbo back. When
+# there was none, keep the new (validated) one: it is harmless while
+# unreferenced, and deleting it could leave an overlay that was enabled
+# before this upgrade without any dtbo.
+rollback_dtbo() {
+    [ "${HB_INSTALLED:-0}" = 1 ] || return 0
+    if [ "$HB_HAD_OLD" = 1 ] && [ -f "$HB_PREV" ]; then
+        safe_copy "$HB_PREV" "$HB_DTBO" && say "restored previous overlay from $HB_PREV" && return 0
+        warn "could not restore $HB_DTBO from $HB_PREV"
+        return 1
+    fi
+    return 0
+}
+
+# Put back apt keyring/sources that an old postrm deleted during upgrade.
+restore_apt_state() {
+    [ -d "$HB_STATE_DIR" ] || return 0
+    if [ -f "$HB_STATE_DIR/keyring" ] && [ ! -e "$HB_KEYRING" ]; then
+        mkdir -p "$(dirname "$HB_KEYRING")" 2>/dev/null &&
+            cp -p "$HB_STATE_DIR/keyring" "$HB_KEYRING" 2>/dev/null &&
+            say "restored $HB_KEYRING" ||
+            warn "could not restore $HB_KEYRING (a copy stays in $HB_STATE_DIR)"
+    fi
+    if [ -f "$HB_STATE_DIR/sources" ] && [ ! -e "$HB_SOURCES_LIST" ]; then
+        mkdir -p "$(dirname "$HB_SOURCES_LIST")" 2>/dev/null &&
+            cp -p "$HB_STATE_DIR/sources" "$HB_SOURCES_LIST" 2>/dev/null &&
+            say "restored $HB_SOURCES_LIST" ||
+            warn "could not restore $HB_SOURCES_LIST (a copy stays in $HB_STATE_DIR)"
+    fi
+}
+
+# Drop only the saved state that is no longer needed: a saved keyring or
+# sources file only once the real one exists again, the overlay state only
+# once config.txt is in its final state.
+clear_state() {
+    [ -d "$HB_STATE_DIR" ] || return 0
+    [ -f "$HB_STATE_DIR/keyring" ] && [ -e "$HB_KEYRING" ] && rm -f "$HB_STATE_DIR/keyring"
+    [ -f "$HB_STATE_DIR/sources" ] && [ -e "$HB_SOURCES_LIST" ] && rm -f "$HB_STATE_DIR/sources"
+    if [ "$HB_CONFIG_OK" = 1 ]; then
+        rm -f "$HB_ENABLED_FLAG" "$HB_PRE_CONFIG" || true
+    fi
+    rmdir "$HB_STATE_DIR" 2>/dev/null || true
+    return 0
+}
+
+configure_overlay() {
+    if [ ! -d "$HB_OVERLAY_DIR" ] || [ ! -f "$HB_CONFIG" ]; then
+        loud "$HB_OVERLAY_DIR or $HB_CONFIG is missing: overlay NOT installed." \
+            "Nothing on the boot partition was changed. Mount it and run:" \
+            "  dpkg-reconfigure $PKG"
+        return 0
+    fi
+    if ! dir_writable "$HB_OVERLAY_DIR" || ! dir_writable "$HB_BOOT_DIR" || [ ! -w "$HB_CONFIG" ]; then
+        loud "$HB_BOOT_DIR is not writable: overlay NOT installed or updated." \
+            "Nothing on the boot partition was changed. Remount it read-write and run:" \
+            "  dpkg-reconfigure $PKG"
+        return 0
+    fi
+
+    if ! build_dtbo; then
+        hb_cleanup
+        if [ -f "$HB_DTBO" ]; then
+            loud "The new overlay could not be built or validated." \
+                "The existing $HB_DTBO and config.txt were left untouched;" \
+                "the device will boot exactly as before."
+            config_refs_overlay && HB_CONFIG_OK=1
+            return 0
+        fi
+        # The dtbo is missing: an old (<= 1.1) postrm deleted it during this
+        # upgrade, or config.txt still loads the overlay but the file is gone.
+        # Put the previous good one back (and re-enable it) if the overlay was
+        # enabled before or is referenced now.
+        if [ -f "$HB_PREV" ] && { [ -f "$HB_ENABLED_FLAG" ] || config_refs_overlay; }; then
+            if safe_copy "$HB_PREV" "$HB_DTBO"; then
+                if ensure_config_block; then
+                    HB_CONFIG_OK=1
+                    loud "The new overlay could not be built or validated." \
+                        "The previous overlay was restored from $HB_PREV and is enabled," \
+                        "so the device will boot as before the upgrade."
+                else
+                    loud "The new overlay could not be built; the previous overlay was restored" \
+                        "to $HB_DTBO but config.txt could NOT be updated to enable it." \
+                        "THE DISPLAY WILL BE DARK after a reboot. Before rebooting, add" \
+                        "'dtoverlay=$OVL' under [all] in $HB_CONFIG."
+                fi
+                return 0
+            fi
+            warn "could not restore $HB_DTBO from $HB_PREV"
+        fi
+        if config_refs_overlay; then
+            loud "The overlay could not be built, $HB_DTBO is MISSING and there is no" \
+                "previous overlay to restore, but config.txt still loads $OVL." \
+                "THE DISPLAY WILL BE DARK after a reboot. Before rebooting, restore a" \
+                "working $HB_DTBO (or fix the build and run 'dpkg-reconfigure $PKG')."
+        else
+            loud "The overlay could not be built and no previous overlay is installed." \
+                "config.txt was NOT changed to load it. The display will not work until" \
+                "this is fixed; do not rely on this boot configuration."
+        fi
+        return 0
+    fi
+
+    if ! install_dtbo; then
+        hb_cleanup
+        rollback_dtbo || true
+        loud "Installing the new overlay failed; the previous overlay and config.txt" \
+            "were left as they were."
+        return 0
+    fi
+
+    if ! ensure_config_block; then
+        hb_cleanup
+        if ! rollback_dtbo; then
+            loud "config.txt could not be updated AND the previous overlay could not be" \
+                "restored. Check $HB_DTBO against $HB_PREV before rebooting."
+        elif [ "$HB_HAD_OLD" = 1 ]; then
+            loud "config.txt could not be updated. The previous overlay and config.txt" \
+                "were left as they were; the device will boot as before."
+        elif [ -f "$HB_ENABLED_FLAG" ] && ! config_refs_overlay; then
+            loud "The overlay was enabled before this upgrade, but the old package removed" \
+                "its dtoverlay line and config.txt could NOT be updated." \
+                "THE DISPLAY WILL BE DARK after a reboot. The new, validated overlay is" \
+                "installed at $HB_DTBO. Before rebooting, add 'dtoverlay=$OVL'" \
+                "under [all] in $HB_CONFIG, or fix the problem and run:" \
+                "  dpkg-reconfigure $PKG"
+        else
+            loud "config.txt could not be updated, so the overlay is NOT enabled." \
+                "The validated overlay is at $HB_DTBO (nothing references it yet)."
+        fi
+        return 0
+    fi
+    HB_CONFIG_OK=1
+    hb_cleanup
+    return 0
+}
+
+case "$1" in
+    configure)
+        trap hb_cleanup EXIT
+        restore_apt_state
+        configure_overlay
+        if [ -f "$HB_CONFIG" ]; then
+            hb_conf="$(warn_conflicts 2>/dev/null)" || hb_conf=""
+            if [ -n "$hb_conf" ]; then
+                warn "config.txt has lines that may conflict with the HackberryPi display/I2C pins."
+                warn "They were NOT changed. Remove them (test with tryboot first) if not needed:"
+                printf '%s\n' "$hb_conf" | sed 's/^/    /' >&2
+            fi
+            warn_orphan_params
+        fi
+        clear_state
+        hb_cleanup
+        trap - EXIT
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        # Nothing was removed by our postrm on upgrade, so nothing to undo.
+        ;;
+    *)
+        ;;
+esac
+
 #DEBHELPER#
 
-echo "Installing overlay"
-dtc -I dts -O dtb -o ${OVERLAY_DIR}/${OVERLAY_NAME} /usr/src/${DKMS_NAME}-${DKMS_VERSION}/hackberrypicm5.dts
-if grep -qx "dtoverlay=${DT_NAME}" "${CONFIG_TXT}"; then
-  echo "Overlay already enabled in config.txt"
-else
-  echo "dtoverlay=${DT_NAME}" >> "${CONFIG_TXT}"
-  echo "Overlay enabled in config.txt"
-fi
 exit 0

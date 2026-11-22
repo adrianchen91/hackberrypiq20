@@ -1,3 +1,14 @@
+hackberrypi-max17048-dkms (1.2-1) unstable; urgency=medium
+
+  * Overlay: sda/scl-gpios open-drain, bus pinned to i2c-11, simple-battery
+    node, runtime parameters, opt-in hw_i2c.
+  * Driver: chip presence check, cached snapshot, notify on change, PM ops,
+    smoothed CRATE, Full hysteresis.
+  * Maintainer scripts rewritten: atomic dtbo install, config.txt backup and
+    marker block, nothing destructive on upgrade.
+
+ -- CNflysky <cnflysky@qq.com>  Mon, 23 Nov 2026 00:00:00 +0000
+
 hackberrypi-max17048-dkms (1.0-1) unstable; urgency=medium
 
   * Initial Debian packaging.

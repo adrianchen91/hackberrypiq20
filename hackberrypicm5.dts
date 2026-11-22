@@ -1,48 +1,87 @@
 /dts-v1/;
 /plugin/;
+
+/*
+ * HackberryPi CM5 (Q20) overlay: DPI panel, FT5x06 touch, MAX17048 fuel gauge.
+ *
+ * Touch, fuel gauge and the Stemma-QT port share one I2C bus on GPIO10/11.
+ * GPIO10/11 are not used by 18-bit DPI (GPIO0-9,12-17,20-25).
+ *
+ * Two bus modes, selected by one parameter. Exactly one of them is merged:
+ *   default (hw_i2c absent or hw_i2c=off): bit-banged i2c-gpio at /i2c-gpio
+ *       fragments 0 and 1 active, fragments 6 and 7 dormant
+ *   hw_i2c (hw_i2c or hw_i2c=on): RP1 hardware i2c1 (i2c@74000) at 100 kHz,
+ *       pin group hackberry_i2c1_10_11 (local, defined in fragment 4)
+ *       fragments 6 and 7 active, fragments 0 and 1 dormant
+ * hw_i2c uses the value-sensitive "=N" / "!N" fragment operators, so
+ * hw_i2c=off is a no-op. Never use "+N" / "-N" here: dtmerge applies those
+ * regardless of the value (tested), so hw_i2c=off would switch modes.
+ *
+ * In both modes the bus is i2c-11 (docs/decisions.md, Q1).
+ *
+ * Fragment numbers are referenced by the hw_i2c override: renumbering a
+ * fragment means updating that string.
+ *
+ * Parameters (dtparam=...):
+ *   hw_i2c                                    use RP1 hardware I2C (opt-in, Q3)
+ *   touch_inv_x, touch_inv_y, touch_swap_xy   touch coordinate fixes
+ *   no_touch, no_fuelgauge                    disable that device (any value disables)
+ *   fuelgauge_mainline                        bind mainline maxim,max17048 instead of the DKMS driver
+ *   charge_uah=<n>, energy_uwh=<n>            battery design capacity (default 5000 mAh / 18.5 Wh)
+ *   pclk=<hz>                                 pixel clock (default 36832000)
+ *   i2c_delay_us=<n>                          i2c-gpio half-bit delay (default 4, about 100 kHz);
+ *                                             no effect with hw_i2c
+ */
 / {
 	compatible = "brcm,bcm2712", "raspberrypi,5-compute-module";
+
+	/* --- default mode: i2c-gpio (disabled by hw_i2c) --- */
+
 	fragment@0 {
+		target-path = "/aliases";
+		__overlay__ {
+			i2c11 = "/i2c-gpio";
+		};
+	};
+
+	fragment@1 {
 		target-path = "/";
 		__overlay__ {
 			i2c_gpio: i2c-gpio {
 				compatible = "i2c-gpio";
-				gpios = <&rp1_gpio 10 0
-				         &rp1_gpio 11 0>;
+				sda-gpios = <&rp1_gpio 10 6>; /* GPIO_OPEN_DRAIN */
+				scl-gpios = <&rp1_gpio 11 6>;
 				i2c-gpio,delay-us = <4>;
-				/* GPIO 10/11 are unused by DPI 18-bit (RGB666) mode, making them available for I2C */
 				#address-cells = <1>;
 				#size-cells = <0>;
-				
+
 				touch: touchscreen@48 {
-					#address-cells = <1>;
-					#size-cells = <0>;
 					compatible = "edt,edt-ft5406";
 					reg = <0x48>;
 					pinctrl-names = "default";
 					pinctrl-0 = <&touch_int_pin>;
-					interrupt-parent = <&gpio>;
+					interrupt-parent = <&rp1_gpio>;
 					interrupts = <27 0x02>;
 					touchscreen-size-x = <720>;
 					touchscreen-size-y = <720>;
 				};
-				
+
 				fuel_gauge: battery@36 {
 					compatible = "hackberrypi,max17048-battery";
 					reg = <0x36>;
-					/* 5000mAh = 5,000,000uAh */
+					monitored-battery = <&battery_info>;
+					/* Legacy properties, kept for one release (the driver falls back to them) */
 					charge-full-design-microamp-hours = <5000000>;
-					
-					/* 18.5Wh = 18,500,000uWh */
 					energy-full-design-microwatt-hours = <18500000>;
-					
-					/* ALRT pin is not connected to a known GPIO, so no interrupts */
+					/* ALRT is not wired to a GPIO: no interrupts */
 				};
 			};
 		};
 	};
-	
-	fragment@1 {
+
+	/* --- always merged --- */
+
+	fragment@2 {
 		target = <&dpi>;
 		__overlay__ {
 			status = "okay";
@@ -55,20 +94,21 @@
 			};
 		};
 	};
-	
-	fragment@2 {
+
+	fragment@3 {
 		target-path = "/";
 		__overlay__ {
 			panel: panel {
 				compatible = "panel-dpi";
-				
-				/* Actual display area for 4-inch square screen is approx 72x72mm *
-				 * But use 144 because it's high dpi and lots of systems *
-				 * don't deal well with small screens */
+
+				/*
+				 * The active area is about 72x72 mm. 144 is used because the
+				 * panel is high-DPI and many systems handle small screens badly.
+				 */
 				width-mm = <144>;
 				height-mm = <144>;
 				bus-format = <0x1024>;
-				
+
 				timing: panel-timing {
 					clock-frequency = <36832000>;
 					hactive = <720>;
@@ -81,11 +121,11 @@
 					vsync-len = <2>;
 					vback-porch = <18>;
 					vsync-active = <1>;
-					
+
 					de-active = <1>;
 					pixelclk-active = <1>;
 				};
-				
+
 				port {
 					panel_in: endpoint {
 						remote-endpoint = <&dpi_out>;
@@ -94,14 +134,113 @@
 			};
 		};
 	};
-	fragment@3 {
+
+	fragment@4 {
 		target = <&rp1_gpio>;
 		__overlay__ {
-			touch_int_pin: gpio27 {
+			touch_int_pin: hackberry_tp_int {
 				function = "gpio";
 				pins = "gpio27";
 				bias-pull-up;
 			};
+
+			/*
+			 * Pin group for hw_i2c, defined here so that the dormant
+			 * fragment needs no external symbol: an unresolved symbol in a
+			 * dormant fragment fails the whole merge even in default mode.
+			 */
+			hackberry_i2c1_pins: hackberry_i2c1_10_11 {
+				function = "i2c1";
+				pins = "gpio10", "gpio11";
+				bias-pull-up;
+			};
 		};
+	};
+
+	/* Moved out of fragment 1 so it exists in both modes. */
+	fragment@5 {
+		target-path = "/";
+		__overlay__ {
+			battery_info: hackberry-battery {
+				compatible = "simple-battery";
+				voltage-min-design-microvolt = <2750000>;
+				voltage-max-design-microvolt = <4200000>;
+				charge-full-design-microamp-hours = <5000000>;
+				energy-full-design-microwatt-hours = <18500000>;
+			};
+		};
+	};
+
+	/* --- hw_i2c mode: RP1 i2c1 on GPIO10/11 (dormant by default) --- */
+
+	fragment@6 {
+		target-path = "/axi/pcie@1000120000/rp1/i2c@74000";
+		__dormant__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&hackberry_i2c1_pins>;
+			clock-frequency = <100000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* Same nodes as in fragment 1; only one copy is ever merged. */
+			touch_hw: touchscreen@48 {
+				compatible = "edt,edt-ft5406";
+				reg = <0x48>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&touch_int_pin>;
+				interrupt-parent = <&rp1_gpio>;
+				interrupts = <27 0x02>;
+				touchscreen-size-x = <720>;
+				touchscreen-size-y = <720>;
+			};
+
+			fuel_gauge_hw: battery@36 {
+				compatible = "hackberrypi,max17048-battery";
+				reg = <0x36>;
+				monitored-battery = <&battery_info>;
+				charge-full-design-microamp-hours = <5000000>;
+				energy-full-design-microwatt-hours = <18500000>;
+			};
+		};
+	};
+
+	/*
+	 * Keep the bus at i2c-11. The base i2c1 alias also points at i2c@74000
+	 * and of_alias_get_id() returns the first match in /aliases (i2c1), so
+	 * i2c1 is pointed at a path that does not exist; of_alias_scan() skips
+	 * it. GPIO2/3 belong to DPI on this board, so i2c_arm (the only user of
+	 * the i2c1 controller) is unusable here anyway.
+	 */
+	fragment@7 {
+		target-path = "/aliases";
+		__dormant__ {
+			i2c1 = "/hackberry-i2c1-is-i2c11";
+			i2c11 = "/axi/pcie@1000120000/rp1/i2c@74000";
+		};
+	};
+
+	__overrides__ {
+		hw_i2c = <0>,"!0!1=6=7";
+		touch_inv_x = <&touch>,"touchscreen-inverted-x?",
+			      <&touch_hw>,"touchscreen-inverted-x?";
+		touch_inv_y = <&touch>,"touchscreen-inverted-y?",
+			      <&touch_hw>,"touchscreen-inverted-y?";
+		touch_swap_xy = <&touch>,"touchscreen-swapped-x-y?",
+				<&touch_hw>,"touchscreen-swapped-x-y?";
+		no_touch = <&touch>,"status=disabled",
+			   <&touch_hw>,"status=disabled";
+		no_fuelgauge = <&fuel_gauge>,"status=disabled",
+			       <&fuel_gauge_hw>,"status=disabled";
+		fuelgauge_mainline = <&fuel_gauge>,"compatible=maxim,max17048",
+				     <&fuel_gauge_hw>,"compatible=maxim,max17048";
+		charge_uah = <&battery_info>,"charge-full-design-microamp-hours:0",
+			     <&fuel_gauge>,"charge-full-design-microamp-hours:0",
+			     <&fuel_gauge_hw>,"charge-full-design-microamp-hours:0";
+		energy_uwh = <&battery_info>,"energy-full-design-microwatt-hours:0",
+			     <&fuel_gauge>,"energy-full-design-microwatt-hours:0",
+			     <&fuel_gauge_hw>,"energy-full-design-microwatt-hours:0";
+		pclk = <&timing>,"clock-frequency:0";
+		i2c_delay_us = <&i2c_gpio>,"i2c-gpio,delay-us:0";
 	};
 };

@@ -5,6 +5,7 @@ on:
       - "debian/**"
       - "hackberrypi-max17048.c"
       - "hackberrypicm5.dts"
+      - "tools/**"
       - ".github/workflows/**"
   workflow_dispatch:
 
@@ -18,7 +19,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Offline overlay gate (PLAN task P0.2). Best-effort on the base dtb: the
+  # runner has no /boot/firmware, so the base dtb is compiled from the
+  # raspberrypi/linux sources. If that compile fails, the validation step is
+  # skipped with a warning rather than failing the release.
+  validate-overlay:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch code
+        uses: actions/checkout@v6
+
+      - name: Install dtc and libfdt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y device-tree-compiler libfdt-dev cmake build-essential
+
+      - name: Build dtmerge from raspberrypi/utils
+        run: |
+          git clone --depth 1 https://github.com/raspberrypi/utils "$RUNNER_TEMP/utils"
+          cmake -S "$RUNNER_TEMP/utils" -B "$RUNNER_TEMP/utils/build"
+          cmake --build "$RUNNER_TEMP/utils/build" --target dtmerge
+          sudo install -m 0755 "$(find "$RUNNER_TEMP/utils/build" -name dtmerge -type f | head -n1)" /usr/local/bin/dtmerge
+
+      - name: Compile base dtb from raspberrypi/linux (best-effort)
+        id: base
+        continue-on-error: true
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse -b rpi-6.12.y \
+            https://github.com/raspberrypi/linux "$RUNNER_TEMP/linux"
+          git -C "$RUNNER_TEMP/linux" sparse-checkout set arch/arm64/boot/dts include
+          cd "$RUNNER_TEMP/linux"
+          cpp -nostdinc -undef -x assembler-with-cpp -I include -I arch/arm64/boot/dts \
+            arch/arm64/boot/dts/broadcom/bcm2712-rpi-cm5-cm5io.dts > "$RUNNER_TEMP/base.dts"
+          dtc -@ -I dts -O dtb -o "$RUNNER_TEMP/base.dtb" "$RUNNER_TEMP/base.dts"
+
+      - name: Validate overlay
+        if: steps.base.outcome == 'success'
+        run: tools/validate-overlay.sh hackberrypicm5.dts "$RUNNER_TEMP/base.dtb"
+
+      - name: Warn when validation was skipped
+        if: steps.base.outcome != 'success'
+        run: echo "::warning::base dtb could not be built; overlay validation skipped"
+
   build:
+    needs: validate-overlay
     runs-on: ubuntu-latest
     container:
       image: debian:stable
@@ -35,8 +79,14 @@ jobs:
         env:
           DEBFULLNAME: ${{ github.actor }}
           DEBEMAIL: "${{ github.actor }}@users.noreply.github.com"
+          # Commit message is untrusted input: pass it through env, never via ${{ }} in the script.
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          dch -D stable -v `cat VERSION` ${{ github.event.head_commit.message }}
+          if [ -n "$COMMIT_MSG" ]; then
+            dch -D stable -v "$(cat VERSION)" -- "$COMMIT_MSG"
+          else
+            dch -D stable -v "$(cat VERSION)"
+          fi
           dpkg-buildpackage -us -uc -b
           mv ../*.deb ./hackberrypi-max17048-dkms-all.deb
 
