@@ -75,11 +75,27 @@ check() { # check <description> <command...>
     if "$@"; then ok "$hb_d"; else bad "$hb_d"; fi
 }
 
+# dh replaces EVERY occurrence of the debhelper token, comments included, so
+# it must appear exactly once per script, alone on its line.
+CUR="debhelper-token"
+for hb_s in preinst postinst postrm; do
+    hb_f="$REPO/debian/hackberrypi-max17048-dkms.$hb_s"
+    [ -f "$hb_f" ] || continue
+    check "$hb_s: token appears once" test "$(grep -c '#DEBHELPER#' "$hb_f")" = 1
+    check "$hb_s: token alone on its line" test "$(grep -c '^#DEBHELPER#$' "$hb_f")" = 1
+done
+
 FIX="$T/fixtures"
 mkdir -p "$FIX/old" "$FIX/new"
 cp "$REPO/hackberrypicm5.dts" "$FIX/good.dts"
 cp "$REAL_BASE_DTB" "$FIX/base.dtb"
 cp "$REAL_BOOT/config.txt" "$FIX/live-config.txt"
+# The live config no longer carries the old GPIO3/4 i2c-gpio line once the
+# package is installed; the "live" fixture must still have it to test the warning.
+if ! grep -q '^dtoverlay=i2c-gpio,bus=11,i2c_gpio_sda=3,i2c_gpio_scl=4' "$FIX/live-config.txt"; then
+    { echo "dtoverlay=i2c-gpio,bus=11,i2c_gpio_sda=3,i2c_gpio_scl=4"; cat "$FIX/live-config.txt"; } > "$FIX/live-config.tmp"
+    mv "$FIX/live-config.tmp" "$FIX/live-config.txt"
+fi
 if [ -f "$REAL_BOOT/overlays/$OVL.dtbo" ]; then
     cp "$REAL_BOOT/overlays/$OVL.dtbo" "$FIX/deployed.dtbo"
 else

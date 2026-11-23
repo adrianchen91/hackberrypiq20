@@ -206,3 +206,10 @@ all survive. Remove: the overlay and block go, nothing dangles. Purge:
 - The "about 1 min" criterion therefore holds for plug-in only.
 - Open: bottom-right touch corner slightly off under KDE (the kernel reports
   719,718 correctly); not compared against the old overlay.
+- Soak (row 5): stopped early by choice after about 25 min (started 10:40,
+  tryboot config with hand-staged module): no i2c, edt or max17048 errors in
+  dmesg. NOT the full hour; repeat on the packaged install.
+- Packaged install (1.2-1): first attempt failed in postinst because a comment
+  held the literal debhelper token, which dh expands everywhere. Fixed; the
+  harness now asserts the token appears once per script. Rebuilt and installed
+  over it; config.txt has one managed block, overlay equals the repo source.

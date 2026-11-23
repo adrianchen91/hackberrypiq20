@@ -18,7 +18,7 @@
 #     exits 0 with a loud warning (no half state, apt is not broken);
 #   * config.txt never ends up referencing a dtbo that does not exist, and a
 #     validated dtbo is never deleted while the overlay was meant to be on.
-# The overlay work runs before the DKMS snippet (#DEBHELPER#), so a module
+# The overlay work runs before the DKMS snippet (the debhelper marker below), so a module
 # build failure cannot prevent the overlay from being installed.
 #
 # The managed block in config.txt looks like this:
