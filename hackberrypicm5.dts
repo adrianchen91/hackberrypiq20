@@ -31,6 +31,13 @@
  *   pclk=<hz>                                 pixel clock (default 36832000)
  *   i2c_delay_us=<n>                          i2c-gpio half-bit delay (default 4, about 100 kHz);
  *                                             no effect with hw_i2c
+ *   i2c_hz=<n>                                hw_i2c bus clock (default 100000). The bus has
+ *                                             10k pull-ups and a 1V8/3V3 level shifter to the
+ *                                             touch controller, so test 400000 under tryboot;
+ *                                             no effect without hw_i2c
+ *   ethernet                                  re-enable RP1 Ethernet. The Q20 board routes no
+ *                                             Ethernet (no RJ45, no MDI nets in the schematic),
+ *                                             so the MAC is disabled by default (fragment 8)
  */
 / {
 	compatible = "brcm,bcm2712", "raspberrypi,5-compute-module";
@@ -220,8 +227,22 @@
 		};
 	};
 
+	/*
+	 * No Ethernet on this carrier: disable the RP1 MAC so macb does not
+	 * probe and poll a PHY with nothing attached. "ethernet" drops this
+	 * fragment ("!8" is value-sensitive, so ethernet=off keeps it disabled).
+	 */
+	fragment@8 {
+		target = <&rp1_eth>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
 	__overrides__ {
 		hw_i2c = <0>,"!0!1=6=7";
+		ethernet = <0>,"!8";
+		i2c_hz = <&{/fragment@6/__dormant__}>,"clock-frequency:0";
 		touch_inv_x = <&touch>,"touchscreen-inverted-x?",
 			      <&touch_hw>,"touchscreen-inverted-x?";
 		touch_inv_y = <&touch>,"touchscreen-inverted-y?",

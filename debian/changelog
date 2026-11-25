@@ -6,6 +6,14 @@ hackberrypi-max17048-dkms (1.2-1) unstable; urgency=medium
     smoothed CRATE, Full hysteresis.
   * Maintainer scripts rewritten: atomic dtbo install, config.txt backup and
     marker block, nothing destructive on upgrade.
+  * Overlay: RP1 Ethernet disabled by default (not routed on the Q20 board;
+    `ethernet` re-enables it); new `i2c_hz` parameter for the hw_i2c bus clock.
+  * tools/stage-tryboot.sh: stage the overlay plus fan-curve and display
+    config.txt tuning for a one-shot tryboot test.
+  * postinst mirrors the overlay into <os_prefix>overlays/ when config.txt
+    sets os_prefix (the firmware loads it from there); postrm removes it.
+  * Maintainer scripts find dtmerge in /usr/local/bin under sudo's
+    secure_path, so merge validation no longer silently skips.
 
  -- CNflysky <cnflysky@qq.com>  Mon, 23 Nov 2026 00:00:00 +0000
 

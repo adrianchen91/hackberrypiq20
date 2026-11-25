@@ -26,7 +26,7 @@ OVL="hackberrypicm5"
 BEGIN_MARK="# BEGIN hackberrypi (managed)"
 END_MARK="# END hackberrypi"
 # Parameter names of the overlay (__overrides__ in hackberrypicm5.dts).
-OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us"
+OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us i2c_hz ethernet"
 
 # Path overrides are honoured only by the test harness, never in the
 # packaged flow (a stray BOOT_DIR in root's environment must not matter).
@@ -209,6 +209,18 @@ unconfigure() {
     return 0
 }
 
+# Same as prefix_overlay_dir in postinst: <boot>/<os_prefix>overlays or nothing.
+prefix_overlay_dir() {
+    [ -f "$HB_CONFIG" ] || return 0
+    hb_pfx="$(sed -n 's/^[[:space:]]*os_prefix=\([^[:space:]#]*\).*/\1/p' "$HB_CONFIG" | tail -n 1)"
+    case "$hb_pfx" in
+        ""|/*|*..*) return 0 ;;
+    esac
+    hb_pdir="$HB_BOOT_DIR/${hb_pfx}overlays"
+    [ "$hb_pdir" != "$HB_OVERLAY_DIR" ] && printf '%s\n' "$hb_pdir"
+    return 0
+}
+
 remove_overlay() {
     if [ ! -d "$HB_BOOT_DIR" ] || [ ! -d "$HB_OVERLAY_DIR" ]; then
         warn "$HB_OVERLAY_DIR not found (boot partition not mounted?)."
@@ -226,6 +238,16 @@ remove_overlay() {
                 warn "could not remove $HB_DTBO (harmless: nothing references it)"
             fi
         fi
+        hb_pdir="$(prefix_overlay_dir)"
+        if [ -n "$hb_pdir" ] && [ -e "$hb_pdir/$OVL.dtbo" ]; then
+            rm -f "$hb_pdir/$OVL.dtbo.tmp"
+            if rm -f "$hb_pdir/$OVL.dtbo"; then
+                sync
+                say "removed $hb_pdir/$OVL.dtbo"
+            else
+                warn "could not remove $hb_pdir/$OVL.dtbo (harmless: nothing references it)"
+            fi
+        fi
         return 0
     fi
     warn "config.txt may still reference $OVL; the overlay file was kept."
@@ -239,6 +261,8 @@ case "$1" in
     purge)
         if remove_overlay; then
             rm -f "$HB_PREV" "$HB_CONFIG_BAK" "$HB_CONFIG_ORIG" 2>/dev/null || true
+            hb_pdir="$(prefix_overlay_dir)"
+            [ -n "$hb_pdir" ] && rm -f "$hb_pdir/$OVL.dtbo.prev" 2>/dev/null || true
         fi
         rm -f "$HB_KEYRING" "$HB_SOURCES_LIST" 2>/dev/null || true
         rm -f "$HB_STATE_DIR/keyring" "$HB_STATE_DIR/sources" "$HB_STATE_DIR/overlay-enabled" \

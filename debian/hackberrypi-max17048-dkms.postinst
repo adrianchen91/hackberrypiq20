@@ -43,13 +43,16 @@
 # by the "parameters outside the block" warning. dpkg itself never edits
 # config.txt in between, so this needs manual edits during the upgrade.
 set -e
+# sudo's secure_path (and so apt run under sudo) can omit /usr/local/bin,
+# where dtmerge is often installed; without it the merge check is skipped.
+case ":$PATH:" in *:/usr/local/bin:*) ;; *) PATH="$PATH:/usr/local/sbin:/usr/local/bin"; export PATH ;; esac
 
 PKG="hackberrypi-max17048-dkms"
 OVL="hackberrypicm5"
 BEGIN_MARK="# BEGIN hackberrypi (managed)"
 END_MARK="# END hackberrypi"
 # Parameter names of the overlay (__overrides__ in hackberrypicm5.dts).
-OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us"
+OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us i2c_hz ethernet"
 
 # Path overrides are honoured only by the test harness, never in the
 # packaged flow (a stray BOOT_DIR in root's environment must not matter).
@@ -115,6 +118,52 @@ safe_copy() {
     cp -p "$1" "$2.tmp" || { rm -f "$2.tmp"; return 1; }
     sync
     mv -f "$2.tmp" "$2" || { rm -f "$2.tmp"; return 1; }
+    return 0
+}
+
+# os_prefix: the firmware loads overlays from <boot>/<os_prefix>overlays/
+# (os_prefix is prepended literally, so "hb73/" gives hb73/overlays/).
+# Prints that directory when config.txt sets a usable os_prefix, else
+# nothing. The last os_prefix= line wins; section filters are ignored
+# because a CM5 matches [all], [cm5] and [pi5] alike.
+prefix_overlay_dir() {
+    [ -f "$HB_CONFIG" ] || return 0
+    hb_pfx="$(sed -n 's/^[[:space:]]*os_prefix=\([^[:space:]#]*\).*/\1/p' "$HB_CONFIG" | tail -n 1)"
+    case "$hb_pfx" in
+        ""|/*|*..*) return 0 ;;
+    esac
+    printf '%s\n' "$HB_BOOT_DIR/${hb_pfx}overlays"
+}
+
+# Copy the installed dtbo into the os_prefix overlay directory, keeping the
+# copy that was there as .prev. Never fails the install: if this does not
+# work, the firmware keeps loading the previous overlay from there.
+mirror_prefix_dtbo() {
+    [ -f "$HB_DTBO" ] || return 0
+    hb_pdir="$(prefix_overlay_dir)"
+    [ -n "$hb_pdir" ] && [ "$hb_pdir" != "$HB_OVERLAY_DIR" ] || return 0
+    if [ ! -d "$hb_pdir" ]; then
+        warn "config.txt sets os_prefix, but $hb_pdir does not exist;"
+        warn "the firmware may not find $OVL.dtbo. Copy $HB_DTBO there."
+        return 0
+    fi
+    hb_pdtbo="$hb_pdir/$OVL.dtbo"
+    if [ -f "$hb_pdtbo" ] && cmp -s "$HB_DTBO" "$hb_pdtbo"; then
+        say "overlay $hb_pdtbo (os_prefix) is already up to date"
+        return 0
+    fi
+    if [ -f "$hb_pdtbo" ] && ! safe_copy "$hb_pdtbo" "$hb_pdtbo.prev"; then
+        loud "Could not back up $hb_pdtbo, so it was NOT updated." \
+            "The firmware (os_prefix) still loads the previous overlay from there."
+        return 0
+    fi
+    if safe_copy "$HB_DTBO" "$hb_pdtbo"; then
+        sync
+        say "installed overlay $hb_pdtbo (os_prefix)"
+    else
+        loud "Could not copy the overlay to $hb_pdtbo." \
+            "The firmware (os_prefix) still loads the previous overlay from there."
+    fi
     return 0
 }
 
@@ -445,6 +494,10 @@ build_dtbo() {
         rm -f "$HB_DTBO_TMP"
         return 1
     fi
+    hb_pdir="$(prefix_overlay_dir)"
+    if [ -n "$hb_pdir" ] && [ -f "${hb_pdir%overlays}bcm2712-rpi-cm5-cm5io.dtb" ]; then
+        HB_BASE_DTB="${hb_pdir%overlays}bcm2712-rpi-cm5-cm5io.dtb"
+    fi
     if command -v dtmerge > /dev/null 2>&1 && [ -f "$HB_BASE_DTB" ]; then
         HB_WORK="$(mktemp -d "${TMPDIR:-/tmp}/hackberrypi.XXXXXX")" || { warn "mktemp failed"; return 1; }
         # dtmerge rejects overlay paths of about 256 characters or more
@@ -638,6 +691,7 @@ case "$1" in
         trap hb_cleanup EXIT
         restore_apt_state
         configure_overlay
+        [ "$HB_CONFIG_OK" = 1 ] && mirror_prefix_dtbo
         if [ -f "$HB_CONFIG" ]; then
             hb_conf="$(warn_conflicts 2>/dev/null)" || hb_conf=""
             if [ -n "$hb_conf" ]; then

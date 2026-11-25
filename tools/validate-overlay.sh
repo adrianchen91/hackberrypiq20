@@ -23,11 +23,12 @@ RP1_GPIO_NODE=/axi/pcie@1000120000/rp1/gpio@d0000
 # Param sets: "label|dtmerge params (space separated, may be empty)|assertions"
 # Assertion ids (suffix @hw = run on HW_BUS):
 #   dpi panel touch touch_irq fuelgauge gpio27 i2c_pins claims touch_off fuel_off alias
-#   one_owner no_i2cgpio alias_hw i2c1_hz unique_devs monbat
+#   one_owner no_i2cgpio alias_hw i2c1_hz i2c1_hz=0xHEX i2c1_off unique_devs monbat eth_off eth_on
 #   has=TEXT nohas=TEXT  (fixed-string match on the merged tree; TEXT must not contain , or |)
-ALL_CHECKS="dpi,panel,touch,touch_irq,fuelgauge,gpio27,i2c_pins,claims"
+ALL_CHECKS="dpi,panel,touch,touch_irq,fuelgauge,gpio27,i2c_pins,claims,eth_off"
 BASE_CHECKS="${ALL_CHECKS},alias,has=max17048-battery\",has=sda-gpios,has=monitored-battery,has=simple-battery"
-HW_CHECKS="dpi,panel,touch@hw,touch_irq@hw,fuelgauge@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,unique_devs,monbat@hw"
+HW_BASE_CHECKS="dpi,panel,touch@hw,touch_irq@hw,fuelgauge@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,unique_devs,monbat@hw,eth_off"
+HW_CHECKS="${HW_BASE_CHECKS},i2c1_hz"
 PARAM_SETS=(
   "default||${BASE_CHECKS},one_owner,unique_devs,nohas=hackberry-i2c1-is-i2c11"
   "touch_inv_x|touch_inv_x|${ALL_CHECKS},has=touchscreen-inverted-x;"
@@ -39,6 +40,12 @@ PARAM_SETS=(
   "battery_5675|charge_uah=5675000 energy_uwh=21000000|${ALL_CHECKS},has=<0x5697f8>,has=<0x1406f40>"
   "pclk_40M|pclk=40000000|${ALL_CHECKS},has=clock-frequency = <0x2625a00>;"
   "i2c_delay_8|i2c_delay_us=8|${ALL_CHECKS},has=delay-us = <0x08>;"
+  "ethernet|ethernet|${ALL_CHECKS/eth_off/eth_on}"
+  "ethernet_on|ethernet=on|${ALL_CHECKS/eth_off/eth_on}"
+  "ethernet_off|ethernet=off|${ALL_CHECKS}"
+  "i2c_hz_nohw|i2c_hz=400000|${BASE_CHECKS},one_owner,unique_devs,i2c1_off"
+  "hw_i2c_hz_400k|hw_i2c i2c_hz=400000|${HW_BASE_CHECKS},i2c1_hz=0x61a80"
+  "hw_ethernet|hw_i2c ethernet|${HW_BASE_CHECKS/eth_off/eth_on},i2c1_hz"
   "all_flags|touch_inv_x touch_inv_y touch_swap_xy no_fuelgauge|dpi,panel,touch,touch_irq,gpio27,i2c_pins,claims,fuel_off"
   "hw_i2c_off|hw_i2c=off|${BASE_CHECKS},one_owner,unique_devs"
   "hw_i2c_0|hw_i2c=0|${BASE_CHECKS},one_owner,unique_devs"
@@ -286,10 +293,11 @@ chk_alias_hw() {
   [[ $a11 == "\"$HW_BUS\"" && $a1 != "\"$HW_BUS\"" ]] || { echo "i2c11=[$a11] i2c1=[$a1]"; return 1; }
 }
 
+# HZ_EXPECT: expected clock-frequency cell (hex, as dtc prints it); 0x186a0 = 100 kHz.
 chk_i2c1_hz() {
   local hz st
   hz=$(node_prop "$HW_BUS" clock-frequency); st=$(node_prop "$HW_BUS" status)
-  [[ $hz == "<0x186a0>" && $st == '"okay"' ]] || { echo "clock-frequency=[$hz] status=[$st] on $HW_BUS"; return 1; }
+  [[ $hz == "<${HZ_EXPECT}>" && $st == '"okay"' ]] || { echo "clock-frequency=[$hz] status=[$st] on $HW_BUS"; return 1; }
 }
 
 # Exactly one enabled edt touch at reg 0x48 and one enabled max17048 gauge at reg 0x36, tree-wide.
@@ -313,6 +321,11 @@ chk_monbat() {
   mb=$(node_prop "$BUS/battery@36" monitored-battery)
   [[ -n $ph && $mb == "$ph" ]] || { echo "monitored-battery=[$mb] /hackberry-battery phandle=[$ph] on $BUS/battery@36"; return 1; }
 }
+
+ETH_NODE=/axi/pcie@1000120000/rp1/ethernet@100000
+chk_i2c1_off() { local st; st=$(node_prop "$HW_BUS" status); [[ $st == '"disabled"' ]] || { echo "status=[$st] on $HW_BUS"; return 1; }; }
+chk_eth_off() { [[ $(node_prop "$ETH_NODE" status) == '"disabled"' ]] || { echo "status=[$(node_prop "$ETH_NODE" status)] on $ETH_NODE"; return 1; }; }
+chk_eth_on()  { local st; st=$(node_prop "$ETH_NODE" status); [[ $(count_nodes "^$ETH_NODE\$") -ge 1 && ( -z $st || $st == '"okay"' ) ]] || { echo "status=[$st] on $ETH_NODE"; return 1; }; }
 
 chk_has()   { grep -qF -- "$TXT" "$MERGED_DTS"; }
 chk_nohas() { ! grep -qF -- "$TXT" "$MERGED_DTS"; }
@@ -361,7 +374,11 @@ run_check_by_id() {
     one_owner)  run_check "$id" 'exactly one enabled owner of GPIO10/11 (i2c-gpio or i2c@74000)' chk_one_owner ;;
     no_i2cgpio) run_check "$id" 'no /i2c-gpio node' chk_no_i2cgpio ;;
     alias_hw)   run_check "$id" "i2c11 alias points at $HW_BUS, i2c1 does not" chk_alias_hw ;;
-    i2c1_hz)    run_check "$id" 'i2c@74000 at 100 kHz and status okay' chk_i2c1_hz ;;
+    i2c1_hz)    HZ_EXPECT=0x186a0; run_check "$id" 'i2c@74000 at 100 kHz and status okay' chk_i2c1_hz ;;
+    i2c1_hz=*)  HZ_EXPECT=${base#i2c1_hz=}; run_check "$id" "i2c@74000 clock-frequency $HZ_EXPECT and status okay" chk_i2c1_hz ;;
+    i2c1_off)   run_check "$id" "$HW_BUS stays disabled" chk_i2c1_off ;;
+    eth_off)    run_check "$id" 'RP1 ethernet disabled' chk_eth_off ;;
+    eth_on)     run_check "$id" 'RP1 ethernet present and not disabled' chk_eth_on ;;
     unique_devs) run_check "$id" 'one enabled touch at 0x48 and one gauge at 0x36' chk_unique_devs ;;
     monbat)     run_check "$id" "gauge on $BUS monitored-battery is /hackberry-battery" chk_monbat ;;
     has=*)      TXT=${id#has=};   run_check "$id" "merged tree contains: $TXT" chk_has ;;

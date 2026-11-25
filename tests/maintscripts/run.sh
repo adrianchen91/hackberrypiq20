@@ -89,7 +89,9 @@ FIX="$T/fixtures"
 mkdir -p "$FIX/old" "$FIX/new"
 cp "$REPO/hackberrypicm5.dts" "$FIX/good.dts"
 cp "$REAL_BASE_DTB" "$FIX/base.dtb"
-cp "$REAL_BOOT/config.txt" "$FIX/live-config.txt"
+# Once the package is installed the live config carries our managed block;
+# the "live" fixture stands for a config before install, so drop the block.
+sed "/^$BM\$/,/^$EM\$/d" "$REAL_BOOT/config.txt" > "$FIX/live-config.txt"
 # The live config no longer carries the old GPIO3/4 i2c-gpio line once the
 # package is installed; the "live" fixture must still have it to test the warning.
 if ! grep -q '^dtoverlay=i2c-gpio,bus=11,i2c_gpio_sda=3,i2c_gpio_scl=4' "$FIX/live-config.txt"; then
@@ -230,7 +232,7 @@ refs_unconditional() {
 outside_block() { sed "/^$BM\$/,/^$EM\$/d" "$1"; }
 # Pristine config with legacy bare lines (and the dtparam lines right after
 # them that only set this overlay's parameters) removed, newline-terminated.
-OVL_PARAMS_RE="^dtparam=((hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us)(=[^,]*)?)(,(hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us)(=[^,]*)?)*$"
+OVL_PARAMS_RE="^dtparam=((hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us|i2c_hz|ethernet)(=[^,]*)?)(,(hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us|i2c_hz|ethernet)(=[^,]*)?)*$"
 expected_outside() {
     awk -v o="$OVL" -v re="$OVL_PARAMS_RE" '{ t = $0; sub(/\r$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
         if (t == "dtoverlay=" o) { after = 1; next }
@@ -735,6 +737,39 @@ run_scenarios() {
     ms new postinst configure 1.2; check "configure exits 0" rc_is $? 0
     check "message says the display will be dark" grep -q "THE DISPLAY WILL BE DARK" "$E/log"
     check "message does not claim config.txt does not load it" sh -c "! grep -q 'was NOT changed to load it' '$E/log'"
+
+    # 28. os_prefix: the firmware reads <os_prefix>overlays/; postinst mirrors
+    # the validated dtbo there, re-runs are no-ops, remove/purge clean it up.
+    new_env "prefix" all
+    echo "os_prefix=hb73/" >> "$B/config.txt"; cp "$B/config.txt" "$E/config.pristine"
+    mkdir -p "$B/hb73/overlays"
+    do_install; check "os_prefix: install exits 0" rc_is $? 0
+    assert_enabled "$FIX/good.dtbo"
+    check "os_prefix: dtbo mirrored into hb73/overlays" cmp -s "$B/hb73/overlays/$OVL.dtbo" "$B/overlays/$OVL.dtbo"
+    check "os_prefix: no .prev on fresh install" [ ! -e "$B/hb73/overlays/$OVL.dtbo.prev" ]
+    cp "$B/config.txt" "$E/after1"
+    ms new postinst configure 1.2; check "os_prefix: reconfigure exits 0" rc_is $? 0
+    check "os_prefix: reconfigure reports mirror up to date" grep -q "(os_prefix) is already up to date" "$E/log"
+    check "os_prefix: reconfigure leaves config.txt unchanged" cmp -s "$B/config.txt" "$E/after1"
+    echo "stale overlay" > "$E/stale.dtbo"; cp "$E/stale.dtbo" "$B/hb73/overlays/$OVL.dtbo"
+    ms new postinst configure 1.2; check "os_prefix: stale mirror refresh exits 0" rc_is $? 0
+    check "os_prefix: stale mirror replaced" cmp -s "$B/hb73/overlays/$OVL.dtbo" "$B/overlays/$OVL.dtbo"
+    check "os_prefix: stale mirror kept as .prev" cmp -s "$B/hb73/overlays/$OVL.dtbo.prev" "$E/stale.dtbo"
+    check "os_prefix: no tmp left in mirror dir" sh -c '! ls "$1"/*.tmp > /dev/null 2>&1' x "$B/hb73/overlays"
+    do_remove; check "os_prefix: remove exits 0" rc_is $? 0
+    check "os_prefix: remove deletes mirrored dtbo" [ ! -e "$B/hb73/overlays/$OVL.dtbo" ]
+    ms new postrm purge; check "os_prefix: purge exits 0" rc_is $? 0
+    check "os_prefix: purge deletes mirrored .prev" [ ! -e "$B/hb73/overlays/$OVL.dtbo.prev" ]
+    new_env "prefix-nodir" all
+    echo "os_prefix=hb73/" >> "$B/config.txt"
+    do_install; check "os_prefix without dir: install exits 0" rc_is $? 0
+    assert_enabled "$FIX/good.dtbo"
+    check "os_prefix without dir: warns" grep -q "does not exist" "$E/log"
+    check "os_prefix without dir: dir not created" [ ! -e "$B/hb73" ]
+    new_env "prefix-unsafe" all
+    echo "os_prefix=../x/" >> "$B/config.txt"
+    do_install; check "os_prefix with ..: install exits 0" rc_is $? 0
+    check "os_prefix with ..: nothing written outside boot" [ ! -e "$E/x" ]
 
     # 23. The config parser is byte-identical in postinst and postrm.
     hb_awk_of "$REPO/debian/hackberrypi-max17048-dkms.postinst" > "$T/awk.postinst"
