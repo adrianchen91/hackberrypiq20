@@ -272,3 +272,12 @@ silently ignored, so a curve written with it runs at the stock speeds
 - Maintainer scripts: re-run over a copy of this device's /boot/firmware is a
   byte-for-byte no-op (both overlay copies "already up to date"); fresh
   install, remove and purge on the same config round-trip cleanly.
+- Power (2026-11-26, on USB-C, `vcgencmd pmic_read_adc`, sum of V*A over the
+  CM5 PMIC rails, 2 s samples): screen on, idle about 2.92 W (VDD_CORE
+  0.63-0.66 W); display blanked with `kscreen-doctor --dpms off` about 2.56 W
+  (VDD_CORE 0.63 W), so blanking saves about 0.36 W, all outside the core rail.
+  Not included: backlight (driven by the keyboard RP2040), panel, fan,
+  keyboard, USB and charger losses. `/sys/class/drm/card1-DPI-1/dpms` stays
+  "On" while KWin blanks the output, so it cannot mark the blanked period.
+- config.txt: `dtoverlay=disable-emmc2` commented out; the firmware rejects it
+  on bcm2712 (`dterror ... not supported`), so it never had an effect.
