@@ -14,6 +14,11 @@ hackberrypi-max17048-dkms (1.2-1) unstable; urgency=medium
     sets os_prefix (the firmware loads it from there); postrm removes it.
   * Maintainer scripts find dtmerge in /usr/local/bin under sudo's
     secure_path, so merge validation no longer silently skips.
+  * Overlay: RP1 hardware I2C is now the default bus at 100 kHz
+    (hw_i2c=off for i2c-gpio); fan curve 47.5/60/67.5/75 C at PWM
+    125/150/175/250 built in (fan_stock keeps the firmware curve).
+  * postinst writes display_auto_detect=0 inside the managed block; existing
+    blocks gain it on the next configure, postrm removes it.
 
  -- CNflysky <cnflysky@qq.com>  Mon, 23 Nov 2026 00:00:00 +0000
 

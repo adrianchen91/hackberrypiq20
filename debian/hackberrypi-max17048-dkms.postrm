@@ -25,8 +25,13 @@ PKG="hackberrypi-max17048-dkms"
 OVL="hackberrypicm5"
 BEGIN_MARK="# BEGIN hackberrypi (managed)"
 END_MARK="# END hackberrypi"
+# Firmware setting written inside the managed block (decision Q5): the overlay
+# drives the panel, so the firmware need not probe for official DSI displays.
+# config.txt is read top to bottom and the last value wins; the block is at
+# the end, and removing the package restores whatever the user had.
+HB_DISP_LINE="display_auto_detect=0"
 # Parameter names of the overlay (__overrides__ in hackberrypicm5.dts).
-OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us i2c_hz ethernet"
+OVL_PARAMS="hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_touch no_fuelgauge fuelgauge_mainline charge_uah energy_uwh pclk i2c_delay_us i2c_hz ethernet fan_stock"
 
 # Path overrides are honoured only by the test harness, never in the
 # packaged flow (a stray BOOT_DIR in root's environment must not matter).
@@ -76,20 +81,20 @@ BEGIN {
     ovlline = "dtoverlay=" ovl
     np = split(params, pl, " "); for (i = 1; i <= np; i++) ours[pl[i]] = 1
     sall = 1; inc = 0; inblk = 0; nblk = 0; good = 0; bad = 0; legacy = 0; userref = 0
-    pend = 0; follow = 0; orphans = 0; lsall = 0; linc = 1; other = 0
+    pend = 0; follow = 0; orphans = 0; lsall = 0; linc = 1; other = 0; blkdisp = 0
 }
 {
     raw = $0; t = trim(raw)
     if (t == bm) {
         if (inblk) bad = 1
         if (follow) { follow = 0; if (mode == "wrap") print em }
-        inblk = 1; nblk++; bgood = 1; bovl = 0; ball = 0
+        inblk = 1; nblk++; bgood = 1; bovl = 0; ball = 0; bdisp = 0
         next
     }
     if (t == em) {
         if (!inblk) { bad = 1; if (mode == "strip" || mode == "wrap") print raw; next }
         inblk = 0
-        if (bgood && bovl == 1) good++
+        if (bgood && bovl == 1) { good++; if (bdisp) blkdisp = 1 }
         if (ball) pend = 1
         next
     }
@@ -102,6 +107,7 @@ BEGIN {
     if (inblk) {
         if (t == ovlline) { bovl++; if (!sall || inc) bgood = 0 }
         else if (ishdr && f == "all") { ball = 1; if (bovl) bgood = 0 }
+        else if (disp != "" && t == disp) { bdisp = 1 }
         else if (index(t, "dtparam=") == 1) { if (!bovl) bgood = 0; if (mode == "params") print raw }
         else if (substr(t, 1, 1) == "#") { if (mode == "params") print raw }
         else if (t != "") { bgood = 0; other++ }
@@ -118,7 +124,7 @@ BEGIN {
     if (t == ovlline) {
         legacy++; follow = 1
         if (legacy == 1) { lsall = sall; linc = inc }
-        if (mode == "wrap") { print bm; print raw }
+        if (mode == "wrap") { print bm; if (disp != "") print disp; print raw }
         next
     }
     if (isuserref(t)) userref++
@@ -133,11 +139,11 @@ END {
     if (follow && mode == "wrap") print em
     if (inblk) bad = 1
     if (mode == "check")
-        printf "bad=%d blocks=%d good=%d legacy=%d userref=%d endall=%d inplace=%d orphans=%d other=%d\n", bad, nblk, good, legacy, userref, (sall && !inc), (legacy == 1 && nblk == 0 && lsall && !linc), orphans, other
+        printf "bad=%d blocks=%d good=%d legacy=%d userref=%d endall=%d inplace=%d orphans=%d other=%d disp=%d\n", bad, nblk, good, legacy, userref, (sall && !inc), (legacy == 1 && nblk == 0 && lsall && !linc), orphans, other, blkdisp
 }'
 
 hb_awk() { # hb_awk <mode> <file>
-    awk -v mode="$1" -v ovl="$OVL" -v bm="$BEGIN_MARK" -v em="$END_MARK" -v params="$OVL_PARAMS" "$HB_AWK" "$2"
+    awk -v mode="$1" -v ovl="$OVL" -v bm="$BEGIN_MARK" -v em="$END_MARK" -v params="$OVL_PARAMS" -v disp="$HB_DISP_LINE" "$HB_AWK" "$2"
 }
 cfg_check() { hb_awk check "$1"; }
 cfg_strip() { hb_awk strip "$1"; }

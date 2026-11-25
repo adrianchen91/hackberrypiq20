@@ -8,52 +8,62 @@
  * GPIO10/11 are not used by 18-bit DPI (GPIO0-9,12-17,20-25).
  *
  * Two bus modes, selected by one parameter. Exactly one of them is merged:
- *   default (hw_i2c absent or hw_i2c=off): bit-banged i2c-gpio at /i2c-gpio
- *       fragments 0 and 1 active, fragments 6 and 7 dormant
- *   hw_i2c (hw_i2c or hw_i2c=on): RP1 hardware i2c1 (i2c@74000) at 100 kHz,
- *       pin group hackberry_i2c1_10_11 (local, defined in fragment 4)
- *       fragments 6 and 7 active, fragments 0 and 1 dormant
- * hw_i2c uses the value-sensitive "=N" / "!N" fragment operators, so
- * hw_i2c=off is a no-op. Never use "+N" / "-N" here: dtmerge applies those
- * regardless of the value (tested), so hw_i2c=off would switch modes.
+ *   default (hw_i2c absent, hw_i2c or hw_i2c=on): RP1 hardware i2c1
+ *       (i2c@74000) at 100 kHz (i2c_hz), pin group hackberry_i2c1_10_11
+ *       (local, defined in fragment 4); fragments 6 and 7 active,
+ *       fragments 0 and 1 dormant
+ *   hw_i2c=off: bit-banged i2c-gpio at /i2c-gpio; fragments 0 and 1 active,
+ *       fragments 6 and 7 dormant
+ * hw_i2c uses the value-sensitive "=N" / "!N" fragment operators, so a bare
+ * hw_i2c (from configs that opted in while it was off by default) keeps the
+ * default. Never use "+N" / "-N" here: dtmerge applies those regardless of
+ * the value (tested), so hw_i2c=off would not switch modes.
  *
  * In both modes the bus is i2c-11 (docs/decisions.md, Q1).
  *
- * Fragment numbers are referenced by the hw_i2c override: renumbering a
- * fragment means updating that string.
+ * Fragment numbers are referenced by the hw_i2c, ethernet and fan_stock
+ * overrides: renumbering a fragment means updating those strings.
  *
  * Parameters (dtparam=...):
- *   hw_i2c                                    use RP1 hardware I2C (opt-in, Q3)
+ *   hw_i2c=off                                bit-banged i2c-gpio instead of RP1 hardware I2C
+ *                                             (hardware is the default since 1.2, decisions Q3)
  *   touch_inv_x, touch_inv_y, touch_swap_xy   touch coordinate fixes
  *   no_touch, no_fuelgauge                    disable that device (any value disables)
  *   fuelgauge_mainline                        bind mainline maxim,max17048 instead of the DKMS driver
  *   charge_uah=<n>, energy_uwh=<n>            battery design capacity (default 5000 mAh / 18.5 Wh)
  *   pclk=<hz>                                 pixel clock (default 36832000)
  *   i2c_delay_us=<n>                          i2c-gpio half-bit delay (default 4, about 100 kHz);
- *                                             no effect with hw_i2c
+ *                                             only with hw_i2c=off
  *   i2c_hz=<n>                                hw_i2c bus clock (default 100000). The bus has
  *                                             10k pull-ups and a 1V8/3V3 level shifter to the
- *                                             touch controller, so test 400000 under tryboot;
- *                                             no effect without hw_i2c
+ *                                             touch controller, so test 400000 under tryboot
+ *                                             (works on the reference unit); no effect with
+ *                                             hw_i2c=off
  *   ethernet                                  re-enable RP1 Ethernet. The Q20 board routes no
  *                                             Ethernet (no RJ45, no MDI nets in the schematic),
  *                                             so the MAC is disabled by default (fragment 8)
+ *   fan_stock                                 keep the firmware's fan curve (and any
+ *                                             dtparam=fan_tempN* lines). Without it, fragments
+ *                                             9-13 set 47.5/60/67.5/75 C, 5 C hysteresis, PWM
+ *                                             125/150/175/250: the stock first step (PWM 75)
+ *                                             stalls the Q20 fan. This overlay is applied after
+ *                                             base dtparams, so it overrides fan_tempN lines.
  */
 / {
 	compatible = "brcm,bcm2712", "raspberrypi,5-compute-module";
 
-	/* --- default mode: i2c-gpio (disabled by hw_i2c) --- */
+	/* --- hw_i2c=off mode: i2c-gpio (dormant by default) --- */
 
 	fragment@0 {
 		target-path = "/aliases";
-		__overlay__ {
+		__dormant__ {
 			i2c11 = "/i2c-gpio";
 		};
 	};
 
 	fragment@1 {
 		target-path = "/";
-		__overlay__ {
+		__dormant__ {
 			i2c_gpio: i2c-gpio {
 				compatible = "i2c-gpio";
 				sda-gpios = <&rp1_gpio 10 6>; /* GPIO_OPEN_DRAIN */
@@ -178,11 +188,11 @@
 		};
 	};
 
-	/* --- hw_i2c mode: RP1 i2c1 on GPIO10/11 (dormant by default) --- */
+	/* --- default mode: RP1 hardware i2c1 on GPIO10/11 (hw_i2c=off drops it) --- */
 
 	fragment@6 {
 		target-path = "/axi/pcie@1000120000/rp1/i2c@74000";
-		__dormant__ {
+		__overlay__ {
 			status = "okay";
 			pinctrl-names = "default";
 			pinctrl-0 = <&hackberry_i2c1_pins>;
@@ -221,7 +231,7 @@
 	 */
 	fragment@7 {
 		target-path = "/aliases";
-		__dormant__ {
+		__overlay__ {
 			i2c1 = "/hackberry-i2c1-is-i2c11";
 			i2c11 = "/axi/pcie@1000120000/rp1/i2c@74000";
 		};
@@ -239,10 +249,54 @@
 		};
 	};
 
+	/*
+	 * Fan curve (fragments 9-13; fan_stock drops them). Labels exist in
+	 * every bcm2712 base DT; same properties the base fan_tempN params set.
+	 */
+	fragment@9 {
+		target = <&cpu_tepid>;
+		__overlay__ {
+			temperature = <47500>;
+			hysteresis = <5000>;
+		};
+	};
+
+	fragment@10 {
+		target = <&cpu_warm>;
+		__overlay__ {
+			temperature = <60000>;
+			hysteresis = <5000>;
+		};
+	};
+
+	fragment@11 {
+		target = <&cpu_hot>;
+		__overlay__ {
+			temperature = <67500>;
+			hysteresis = <5000>;
+		};
+	};
+
+	fragment@12 {
+		target = <&cpu_vhot>;
+		__overlay__ {
+			temperature = <75000>;
+			hysteresis = <5000>;
+		};
+	};
+
+	fragment@13 {
+		target = <&fan>;
+		__overlay__ {
+			cooling-levels = <0 125 150 175 250>;
+		};
+	};
+
 	__overrides__ {
 		hw_i2c = <0>,"!0!1=6=7";
 		ethernet = <0>,"!8";
-		i2c_hz = <&{/fragment@6/__dormant__}>,"clock-frequency:0";
+		fan_stock = <0>,"!9!10!11!12!13";
+		i2c_hz = <&{/fragment@6/__overlay__}>,"clock-frequency:0";
 		touch_inv_x = <&touch>,"touchscreen-inverted-x?",
 			      <&touch_hw>,"touchscreen-inverted-x?";
 		touch_inv_y = <&touch>,"touchscreen-inverted-y?",

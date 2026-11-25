@@ -24,47 +24,54 @@ RP1_GPIO_NODE=/axi/pcie@1000120000/rp1/gpio@d0000
 # Assertion ids (suffix @hw = run on HW_BUS):
 #   dpi panel touch touch_irq fuelgauge gpio27 i2c_pins claims touch_off fuel_off alias
 #   one_owner no_i2cgpio alias_hw i2c1_hz i2c1_hz=0xHEX i2c1_off unique_devs monbat eth_off eth_on
+#   fan_curve fan_stock
 #   has=TEXT nohas=TEXT  (fixed-string match on the merged tree; TEXT must not contain , or |)
-ALL_CHECKS="dpi,panel,touch,touch_irq,fuelgauge,gpio27,i2c_pins,claims,eth_off"
+ALL_CHECKS="dpi,panel,touch,touch_irq,fuelgauge,gpio27,i2c_pins,claims,eth_off,fan_curve"
 BASE_CHECKS="${ALL_CHECKS},alias,has=max17048-battery\",has=sda-gpios,has=monitored-battery,has=simple-battery"
-HW_BASE_CHECKS="dpi,panel,touch@hw,touch_irq@hw,fuelgauge@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,unique_devs,monbat@hw,eth_off"
+HW_BASE_CHECKS="dpi,panel,touch@hw,touch_irq@hw,fuelgauge@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,unique_devs,monbat@hw,eth_off,fan_curve"
 HW_CHECKS="${HW_BASE_CHECKS},i2c1_hz"
+# Since 1.2 the default bus is RP1 hardware i2c1; "gpio_*" sets use hw_i2c=off.
 PARAM_SETS=(
-  "default||${BASE_CHECKS},one_owner,unique_devs,nohas=hackberry-i2c1-is-i2c11"
-  "touch_inv_x|touch_inv_x|${ALL_CHECKS},has=touchscreen-inverted-x;"
-  "touch_inv_y|touch_inv_y|${ALL_CHECKS},has=touchscreen-inverted-y;"
-  "touch_swap_xy|touch_swap_xy|${ALL_CHECKS},has=touchscreen-swapped-x-y;"
-  "no_touch|no_touch|dpi,panel,fuelgauge,gpio27,i2c_pins,claims,touch_off"
-  "no_fuelgauge|no_fuelgauge|dpi,panel,touch,touch_irq,gpio27,i2c_pins,claims,fuel_off"
-  "fuelgauge_mainline|fuelgauge_mainline|${ALL_CHECKS},has=max17048\";,nohas=max17048-battery"
-  "battery_5675|charge_uah=5675000 energy_uwh=21000000|${ALL_CHECKS},has=<0x5697f8>,has=<0x1406f40>"
-  "pclk_40M|pclk=40000000|${ALL_CHECKS},has=clock-frequency = <0x2625a00>;"
-  "i2c_delay_8|i2c_delay_us=8|${ALL_CHECKS},has=delay-us = <0x08>;"
-  "ethernet|ethernet|${ALL_CHECKS/eth_off/eth_on}"
-  "ethernet_on|ethernet=on|${ALL_CHECKS/eth_off/eth_on}"
-  "ethernet_off|ethernet=off|${ALL_CHECKS}"
-  "i2c_hz_nohw|i2c_hz=400000|${BASE_CHECKS},one_owner,unique_devs,i2c1_off"
-  "hw_i2c_hz_400k|hw_i2c i2c_hz=400000|${HW_BASE_CHECKS},i2c1_hz=0x61a80"
-  "hw_ethernet|hw_i2c ethernet|${HW_BASE_CHECKS/eth_off/eth_on},i2c1_hz"
-  "all_flags|touch_inv_x touch_inv_y touch_swap_xy no_fuelgauge|dpi,panel,touch,touch_irq,gpio27,i2c_pins,claims,fuel_off"
-  "hw_i2c_off|hw_i2c=off|${BASE_CHECKS},one_owner,unique_devs"
-  "hw_i2c_0|hw_i2c=0|${BASE_CHECKS},one_owner,unique_devs"
+  "default||${HW_CHECKS},has=simple-battery,has=monitored-battery,nohas=sda-gpios"
+  "touch_inv_x|touch_inv_x|${HW_CHECKS},has=touchscreen-inverted-x;"
+  "touch_inv_y|touch_inv_y|${HW_CHECKS},has=touchscreen-inverted-y;"
+  "touch_swap_xy|touch_swap_xy|${HW_CHECKS},has=touchscreen-swapped-x-y;"
+  "no_touch|no_touch|dpi,panel,fuelgauge@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,touch_off@hw"
+  "no_fuelgauge|no_fuelgauge|dpi,panel,touch@hw,touch_irq@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,fuel_off@hw"
+  "fuelgauge_mainline|fuelgauge_mainline|${HW_CHECKS},has=max17048\";,nohas=max17048-battery"
+  "battery_5675|charge_uah=5675000 energy_uwh=21000000|${HW_CHECKS},has=<0x5697f8>,has=<0x1406f40>"
+  "pclk_40M|pclk=40000000|${HW_CHECKS},has=clock-frequency = <0x2625a00>;"
+  "i2c_hz_400k|i2c_hz=400000|${HW_BASE_CHECKS},i2c1_hz=0x61a80"
+  "i2c_delay_8_hw|i2c_delay_us=8|${HW_CHECKS},nohas=delay-us = <0x08>;"
+  "ethernet|ethernet|${HW_BASE_CHECKS/eth_off/eth_on},i2c1_hz"
+  "ethernet_on|ethernet=on|${HW_BASE_CHECKS/eth_off/eth_on},i2c1_hz"
+  "ethernet_off|ethernet=off|${HW_CHECKS}"
+  "fan_stock|fan_stock|${HW_CHECKS/fan_curve/fan_stock}"
+  "fan_stock_off|fan_stock=off|${HW_CHECKS}"
+  "all_flags|touch_inv_x touch_inv_y touch_swap_xy no_fuelgauge|dpi,panel,touch@hw,touch_irq@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,fuel_off@hw"
   "hw_i2c|hw_i2c|${HW_CHECKS}"
   "hw_i2c_on|hw_i2c=on|${HW_CHECKS}"
   "hw_i2c_1|hw_i2c=1|${HW_CHECKS}"
   "hw_i2c_twice|hw_i2c hw_i2c|${HW_CHECKS}"
-  "hw_on_off|hw_i2c=on hw_i2c=off|${BASE_CHECKS},one_owner"
-  "hw_last|touch_inv_x hw_i2c|${HW_CHECKS},has=touchscreen-inverted-x;"
-  "hw_touch_inv_x|hw_i2c touch_inv_x|${HW_CHECKS},has=touchscreen-inverted-x;"
-  "hw_touch_inv_y|hw_i2c touch_inv_y|${HW_CHECKS},has=touchscreen-inverted-y;"
-  "hw_touch_swap_xy|hw_i2c touch_swap_xy|${HW_CHECKS},has=touchscreen-swapped-x-y;"
-  "hw_no_touch|hw_i2c no_touch|dpi,panel,fuelgauge@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,touch_off@hw"
-  "hw_no_fuelgauge|hw_i2c no_fuelgauge|dpi,panel,touch@hw,touch_irq@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,fuel_off@hw"
-  "hw_fuelgauge_mainline|hw_i2c fuelgauge_mainline|${HW_CHECKS},has=max17048\";,nohas=max17048-battery"
-  "hw_battery_5675|hw_i2c charge_uah=5675000 energy_uwh=21000000|${HW_CHECKS},has=<0x5697f8>,has=<0x1406f40>"
-  "hw_pclk_40M|hw_i2c pclk=40000000|${HW_CHECKS},has=clock-frequency = <0x2625a00>;"
-  "hw_i2c_delay_8|hw_i2c i2c_delay_us=8|${HW_CHECKS},nohas=delay-us = <0x08>;"
-  "hw_all_flags|hw_i2c touch_inv_x touch_inv_y touch_swap_xy no_fuelgauge|dpi,panel,touch@hw,touch_irq@hw,gpio27,claims,one_owner,no_i2cgpio,alias_hw,i2c1_hz,fuel_off@hw"
+  "hw_off_on|hw_i2c=off hw_i2c=on|${HW_CHECKS}"
+  "hw_i2c_hz_400k|hw_i2c i2c_hz=400000|${HW_BASE_CHECKS},i2c1_hz=0x61a80"
+  "hw_live_config|hw_i2c i2c_hz=400000|${HW_BASE_CHECKS},i2c1_hz=0x61a80,eth_off,fan_curve"
+  "gpio|hw_i2c=off|${BASE_CHECKS},one_owner,unique_devs,i2c1_off,nohas=hackberry-i2c1-is-i2c11"
+  "gpio_0|hw_i2c=0|${BASE_CHECKS},one_owner,unique_devs,i2c1_off"
+  "gpio_on_off|hw_i2c=on hw_i2c=off|${BASE_CHECKS},one_owner"
+  "gpio_touch_inv_x|hw_i2c=off touch_inv_x|${ALL_CHECKS},has=touchscreen-inverted-x;"
+  "gpio_touch_inv_y|hw_i2c=off touch_inv_y|${ALL_CHECKS},has=touchscreen-inverted-y;"
+  "gpio_touch_swap_xy|hw_i2c=off touch_swap_xy|${ALL_CHECKS},has=touchscreen-swapped-x-y;"
+  "gpio_no_touch|hw_i2c=off no_touch|dpi,panel,fuelgauge,gpio27,i2c_pins,claims,touch_off"
+  "gpio_no_fuelgauge|hw_i2c=off no_fuelgauge|dpi,panel,touch,touch_irq,gpio27,i2c_pins,claims,fuel_off"
+  "gpio_fuelgauge_mainline|hw_i2c=off fuelgauge_mainline|${ALL_CHECKS},has=max17048\";,nohas=max17048-battery"
+  "gpio_battery_5675|hw_i2c=off charge_uah=5675000 energy_uwh=21000000|${ALL_CHECKS},has=<0x5697f8>,has=<0x1406f40>"
+  "gpio_pclk_40M|hw_i2c=off pclk=40000000|${ALL_CHECKS},has=clock-frequency = <0x2625a00>;"
+  "gpio_i2c_delay_8|hw_i2c=off i2c_delay_us=8|${ALL_CHECKS},has=delay-us = <0x08>;"
+  "gpio_i2c_hz|hw_i2c=off i2c_hz=400000|${BASE_CHECKS},one_owner,unique_devs,i2c1_off"
+  "gpio_ethernet|hw_i2c=off ethernet|${ALL_CHECKS/eth_off/eth_on}"
+  "gpio_fan_stock|hw_i2c=off fan_stock|${ALL_CHECKS/fan_curve/fan_stock}"
+  "gpio_all_flags|hw_i2c=off touch_inv_x touch_inv_y touch_swap_xy no_fuelgauge|dpi,panel,touch,touch_irq,gpio27,i2c_pins,claims,fuel_off"
 )
 
 # dtc 1.8.1 rejects -Wall, so the check names are listed explicitly.
@@ -324,6 +331,16 @@ chk_monbat() {
 
 ETH_NODE=/axi/pcie@1000120000/rp1/ethernet@100000
 chk_i2c1_off() { local st; st=$(node_prop "$HW_BUS" status); [[ $st == '"disabled"' ]] || { echo "status=[$st] on $HW_BUS"; return 1; }; }
+TRIPS=/thermal-zones/cpu-thermal/trips
+# fan_curve: this overlay's curve; fan_stock: the firmware default it replaces.
+fan_is() { # fan_is T0 T1 T2 T3 HYST LEVELS (hex as dtc prints them)
+  local got want
+  got="$(node_prop $TRIPS/cpu-tepid temperature) $(node_prop $TRIPS/cpu-warm temperature) $(node_prop $TRIPS/cpu-hot temperature) $(node_prop $TRIPS/cpu-vhot temperature) $(node_prop $TRIPS/cpu-tepid hysteresis) $(node_prop /cooling_fan cooling-levels)"
+  want="<$1> <$2> <$3> <$4> <$5> <$6>"
+  [[ $got == "$want" ]] || { echo "fan: got [$got] want [$want]"; return 1; }
+}
+chk_fan_curve() { fan_is 0xb98c 0xea60 0x107ac 0x124f8 0x1388 "0x00 0x7d 0x96 0xaf 0xfa"; }
+chk_fan_stock() { fan_is 0xc350 0xea60 0x107ac 0x124f8 0x1388 "0x00 0x4b 0x7d 0xaf 0xfa"; }
 chk_eth_off() { [[ $(node_prop "$ETH_NODE" status) == '"disabled"' ]] || { echo "status=[$(node_prop "$ETH_NODE" status)] on $ETH_NODE"; return 1; }; }
 chk_eth_on()  { local st; st=$(node_prop "$ETH_NODE" status); [[ $(count_nodes "^$ETH_NODE\$") -ge 1 && ( -z $st || $st == '"okay"' ) ]] || { echo "status=[$st] on $ETH_NODE"; return 1; }; }
 
@@ -377,6 +394,8 @@ run_check_by_id() {
     i2c1_hz)    HZ_EXPECT=0x186a0; run_check "$id" 'i2c@74000 at 100 kHz and status okay' chk_i2c1_hz ;;
     i2c1_hz=*)  HZ_EXPECT=${base#i2c1_hz=}; run_check "$id" "i2c@74000 clock-frequency $HZ_EXPECT and status okay" chk_i2c1_hz ;;
     i2c1_off)   run_check "$id" "$HW_BUS stays disabled" chk_i2c1_off ;;
+    fan_curve)  run_check "$id" 'fan curve 47.5/60/67.5/75 C, PWM 125/150/175/250' chk_fan_curve ;;
+    fan_stock)  run_check "$id" 'firmware default fan curve kept' chk_fan_stock ;;
     eth_off)    run_check "$id" 'RP1 ethernet disabled' chk_eth_off ;;
     eth_on)     run_check "$id" 'RP1 ethernet present and not disabled' chk_eth_on ;;
     unique_devs) run_check "$id" 'one enabled touch at 0x48 and one gauge at 0x36' chk_unique_devs ;;

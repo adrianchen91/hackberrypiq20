@@ -32,6 +32,7 @@ REAL_BASE_DTB="$REAL_BOOT/bcm2712-rpi-cm5-cm5io.dtb"
 REAL_FILES="$REAL_BOOT/config.txt $REAL_BOOT/overlays/$OVL.dtbo /usr/share/keyrings/hackberrypi-max17048.gpg /etc/apt/sources.list.d/hackberrypi-max17048.sources /var/lib/hackberrypi-max17048-dkms"
 BM="# BEGIN hackberrypi (managed)"
 EM="# END hackberrypi"
+DL="display_auto_detect=0"   # firmware line the package writes inside the block
 
 if [ "$(id -u)" = 0 ]; then
     echo "refusing to run as root" >&2
@@ -232,7 +233,7 @@ refs_unconditional() {
 outside_block() { sed "/^$BM\$/,/^$EM\$/d" "$1"; }
 # Pristine config with legacy bare lines (and the dtparam lines right after
 # them that only set this overlay's parameters) removed, newline-terminated.
-OVL_PARAMS_RE="^dtparam=((hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us|i2c_hz|ethernet)(=[^,]*)?)(,(hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us|i2c_hz|ethernet)(=[^,]*)?)*$"
+OVL_PARAMS_RE="^dtparam=((hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us|i2c_hz|ethernet|fan_stock)(=[^,]*)?)(,(hw_i2c|touch_inv_x|touch_inv_y|touch_swap_xy|no_touch|no_fuelgauge|fuelgauge_mainline|charge_uah|energy_uwh|pclk|i2c_delay_us|i2c_hz|ethernet|fan_stock)(=[^,]*)?)*$"
 expected_outside() {
     awk -v o="$OVL" -v re="$OVL_PARAMS_RE" '{ t = $0; sub(/\r$/, "", t); sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
         if (t == "dtoverlay=" o) { after = 1; next }
@@ -240,7 +241,7 @@ expected_outside() {
         after = 0; print }' "$1"
 }
 # Config with only the marker lines removed (in-place wrap check).
-without_markers() { grep -vxF -e "$BM" -e "$EM" "$1"; }
+without_markers() { grep -vxF -e "$BM" -e "$EM" -e "$DL" "$1"; }
 block_lines() { sed -n "/^$BM\$/,/^$EM\$/p" "$1" | tr '\n' '|'; }
 hb_awk_of() { sed -n "/^HB_AWK='/,/^}'\$/p" "$1"; }
 same_text() { [ "$(cat "$1"; echo x)" = "$(cat "$2"; echo x)" ]; }
@@ -334,15 +335,15 @@ run_scenarios() {
     new_env "placement-cm4" cm4
     do_install
     check "[all] added inside block when file ends in [cm4]" \
-        [ "$(sed -n "/^$BM\$/,/^$EM\$/p" "$B/config.txt" | tr '\n' '|')" = "$BM|[all]|dtoverlay=$OVL|$EM|" ]
+        [ "$(sed -n "/^$BM\$/,/^$EM\$/p" "$B/config.txt" | tr '\n' '|')" = "$BM|[all]|$DL|dtoverlay=$OVL|$EM|" ]
     new_env "placement-all" all
     do_install
     check "no extra [all] when file already ends in [all]" \
-        [ "$(sed -n "/^$BM\$/,/^$EM\$/p" "$B/config.txt" | tr '\n' '|')" = "$BM|dtoverlay=$OVL|$EM|" ]
+        [ "$(sed -n "/^$BM\$/,/^$EM\$/p" "$B/config.txt" | tr '\n' '|')" = "$BM|$DL|dtoverlay=$OVL|$EM|" ]
     new_env "placement-include" include
     do_install
     check "[all] re-asserted after an include" \
-        [ "$(sed -n "/^$BM\$/,/^$EM\$/p" "$B/config.txt" | tr '\n' '|')" = "$BM|[all]|dtoverlay=$OVL|$EM|" ]
+        [ "$(sed -n "/^$BM\$/,/^$EM\$/p" "$B/config.txt" | tr '\n' '|')" = "$BM|[all]|$DL|dtoverlay=$OVL|$EM|" ]
 
     # 3. User adds settings after our [all]-carrying block, then removes the
     #    package: those settings must stay unconditional.
@@ -540,7 +541,7 @@ run_scenarios() {
     without_markers "$B/config.txt" > "$E/nomark"
     check "legacy line wrapped in place (config minus markers == pristine)" same_text "$E/nomark" "$E/config.pristine"
     check "our dtparam lines inside the block, others outside" \
-        [ "$(block_lines "$B/config.txt")" = "$BM|dtoverlay=$OVL|dtparam=touch_inv_x|dtparam=pclk=35000000|$EM|" ]
+        [ "$(block_lines "$B/config.txt")" = "$BM|$DL|dtoverlay=$OVL|dtparam=touch_inv_x|dtparam=pclk=35000000|$EM|" ]
     check "foreign dtparam stays right after the block" \
         sh -c 'grep -A1 -xF "$1" "$2" | tail -n 1 | grep -qx "dtparam=fan_temp0=40000"' x "$EM" "$B/config.txt"
     check "no orphan-param warning" sh -c "! grep -q 'parameters outside' '$E/log'"
@@ -557,7 +558,7 @@ run_scenarios() {
     without_markers "$B/config.txt" > "$E/nomark"
     check "1.1 upgrade restores the line at its old position" same_text "$E/nomark" "$E/config.pristine"
     check "1.1 upgrade: params inside the block" \
-        [ "$(block_lines "$B/config.txt")" = "$BM|dtoverlay=$OVL|dtparam=touch_inv_x|dtparam=pclk=35000000|$EM|" ]
+        [ "$(block_lines "$B/config.txt")" = "$BM|$DL|dtoverlay=$OVL|dtparam=touch_inv_x|dtparam=pclk=35000000|$EM|" ]
     check ".orig is the pre-upgrade config" cmp -s "$B/config.txt.hackberrypi.orig" "$E/config.pristine"
     check "state cleared" [ ! -e "$E/state" ]
 
@@ -568,7 +569,7 @@ run_scenarios() {
     ms new postinst configure 1.1; check "fallback configure exits 0" rc_is $? 0
     check "fallback: one reference, unconditional" sh -c '[ "$1" = 1 ]' x "$(refs "$B/config.txt")"
     check "fallback: saved params re-added in the block" \
-        [ "$(block_lines "$B/config.txt")" = "$BM|[all]|dtoverlay=$OVL|dtparam=touch_inv_x|dtparam=pclk=35000000|$EM|" ]
+        [ "$(block_lines "$B/config.txt")" = "$BM|[all]|$DL|dtoverlay=$OVL|dtparam=touch_inv_x|dtparam=pclk=35000000|$EM|" ]
     check "fallback: orphaned copies are warned about" grep -q "line 5: dtparam=touch_inv_x" "$E/log"
     check "no dangling dtbo reference" no_dangling
 
@@ -577,7 +578,7 @@ run_scenarios() {
     assert_enabled "$FIX/good.dtbo"
     assert_preserved
     check "conditional legacy line moved with its params under [all]" \
-        [ "$(block_lines "$B/config.txt")" = "$BM|[all]|dtoverlay=$OVL|dtparam=touch_inv_y|$EM|" ]
+        [ "$(block_lines "$B/config.txt")" = "$BM|[all]|$DL|dtoverlay=$OVL|dtparam=touch_inv_y|$EM|" ]
 
     new_env "orphan-warning" orphan
     do_install
@@ -597,7 +598,7 @@ run_scenarios() {
     echo "dtoverlay=$OVL" >> "$B/config.txt"        # forces a rebuild
     ms new postinst configure 1.2; check "rebuild exits 0" rc_is $? 0
     check "rebuild keeps dtparam and comment lines in the block" \
-        [ "$(block_lines "$B/config.txt")" = "$BM|dtoverlay=$OVL|dtparam=pclk=35000000|# my note|$EM|" ]
+        [ "$(block_lines "$B/config.txt")" = "$BM|$DL|dtoverlay=$OVL|dtparam=pclk=35000000|# my note|$EM|" ]
     assert_enabled "$FIX/good.dtbo"
 
     # 19. Review fix 3: state survives a preinst re-run and a failed restore.
@@ -665,7 +666,7 @@ run_scenarios() {
     for extra in "gpu_mem=64" "dtoverlay=$OVL,touch_inv_x"; do
         new_env "block-foreign-$(printf '%s' "$extra" | tr -c 'a-z0-9' '_')" all
         do_install
-        check "precondition: managed block installed" [ "$(block_lines "$B/config.txt")" = "$BM|dtoverlay=$OVL|$EM|" ]
+        check "precondition: managed block installed" [ "$(block_lines "$B/config.txt")" = "$BM|$DL|dtoverlay=$OVL|$EM|" ]
         sed -i "/^dtoverlay=$OVL\$/a $extra" "$B/config.txt"
         echo "dtoverlay=$OVL" >> "$B/config.txt"      # would force a rebuild
         cp "$B/config.txt" "$E/before"
@@ -770,6 +771,25 @@ run_scenarios() {
     echo "os_prefix=../x/" >> "$B/config.txt"
     do_install; check "os_prefix with ..: install exits 0" rc_is $? 0
     check "os_prefix with ..: nothing written outside boot" [ ! -e "$E/x" ]
+
+    # 29. display_auto_detect=0 lives in the block: an existing block without
+    # it (installs before this change) gets it on re-run, params survive, and
+    # remove restores the user's own setting.
+    new_env "disp-upgrade" all
+    echo "display_auto_detect=1" >> "$B/config.txt"
+    printf '%s\n' "$BM" "dtoverlay=$OVL" "dtparam=hw_i2c" "dtparam=i2c_hz=400000" "$EM" >> "$B/config.txt"
+    sed "/^$BM\$/,/^$EM\$/d" "$B/config.txt" > "$E/config.pristine"
+    ms new postinst configure 1.2; check "disp: configure exits 0" rc_is $? 0
+    check "disp: line added, params kept" \
+        [ "$(block_lines "$B/config.txt")" = "$BM|$DL|dtoverlay=$OVL|dtparam=hw_i2c|dtparam=i2c_hz=400000|$EM|" ]
+    check "disp: user's own display_auto_detect=1 left in place" grep -qx "display_auto_detect=1" "$B/config.txt"
+    check "disp: block's line comes last (wins)" sh -c '[ "$(grep "^display_auto_detect=" "$1" | tail -n 1)" = "display_auto_detect=0" ]' x "$B/config.txt"
+    cp "$B/config.txt" "$E/after1"
+    ms new postinst configure 1.2
+    check "disp: re-run is a no-op" cmp -s "$B/config.txt" "$E/after1"
+    check "disp: re-run says already enabled" grep -q "overlay already enabled" "$E/log"
+    do_remove; check "disp: remove exits 0" rc_is $? 0
+    check "disp: remove restores pre-install config" same_text "$B/config.txt" "$E/config.pristine"
 
     # 23. The config parser is byte-identical in postinst and postrm.
     hb_awk_of "$REPO/debian/hackberrypi-max17048-dkms.postinst" > "$T/awk.postinst"

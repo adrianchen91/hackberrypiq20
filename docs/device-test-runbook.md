@@ -204,9 +204,11 @@ sudo tools/stage-tryboot.sh               # hw_i2c at 400 kHz + config tweaks
 sudo reboot '0 tryboot'
 ```
 
-Its config tweaks are `display_auto_detect=0`, `enable_dpi_lcd`,
-`display_default_lcd` and `dpi_group` removed, and a fan curve based on the Pi 5 default
-(50/60/67.5/75 C at PWM 125/150/175/250, 5 C hysteresis) instead of the 40 C start. To test one change
+Its config tweaks are `display_auto_detect=0` and `enable_dpi_lcd`,
+`display_default_lcd` and `dpi_group` removed. The fan curve
+(47.5/60/67.5/75 C at PWM 125/150/175/250, 5 C hysteresis) is built into the
+overlay since then, and the package writes `display_auto_detect=0` into its
+managed block, so a fresh install or reinstall gets both without this script. To test one change
 at a time: `--params ""` (Ethernet off only), `--params hw_i2c` (100 kHz),
 `--no-config-tweaks` (overlay only).
 

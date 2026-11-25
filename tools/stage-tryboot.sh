@@ -4,7 +4,7 @@
 # Usage: sudo tools/stage-tryboot.sh [--params P] [--no-config-tweaks] [--dry-run]
 #   --params P          overlay params for the test, comma separated
 #                       (default "hw_i2c,i2c_hz=400000"; "" tests the overlay alone)
-#   --no-config-tweaks  only swap the overlay; leave fan and display lines alone
+#   --no-config-tweaks  only swap the overlay; leave the display lines alone
 #   --dry-run           write nothing; print the tryboot.txt diff (no root needed)
 #
 # What it does (never touches config.txt or the installed hackberrypicm5.dtbo):
@@ -18,8 +18,9 @@
 #          display_auto_detect=0 (the overlay drives the panel; skips DSI probing)
 #          enable_dpi_lcd, display_default_lcd, dpi_group removed (legacy
 #            firmware-framebuffer DPI settings, unused with KMS + this overlay)
-#          dtparam=fan_temp* replaced by this curve (speed params are fan_tempN_speed;
-#             _fan is silently ignored): 50/60/67.5/75 C, 5 C hyst, PWM 125/150/175/250
+#      The fan curve is not a config tweak: the overlay sets it (fragments
+#      9-13, "fan_stock" keeps the firmware's), so dtparam=fan_temp* lines are
+#      left alone and the overlay overrides them.
 #
 # Then: sudo reboot '0 tryboot'. A hang or black screen recovers with a power
 # cycle, which boots the normal config.txt. See docs/device-test-runbook.md
@@ -80,7 +81,7 @@ OVL_DIRS=("$FW/overlays")
 # 2. Build tryboot.txt.
 LINE="dtoverlay=$NEXT${PARAMS:+,$PARAMS}"
 awk -v line="$LINE" -v tweaks="$TWEAKS" '
-  BEGIN { inblk = 0; done = 0; fan_done = 0 }
+  BEGIN { inblk = 0; done = 0 }
   /^# BEGIN hackberrypi \(managed\)/ { inblk = 1; print; next }
   /^# END hackberrypi/              { inblk = 0; print; next }
   inblk && /^dtoverlay=hackberrypicm5([,[:space:]]|$)/ {
@@ -91,16 +92,6 @@ awk -v line="$LINE" -v tweaks="$TWEAKS" '
   inblk && /^[[:space:]]*dtparam=/ { next }
   tweaks && /^[[:space:]]*display_auto_detect=/ { print "display_auto_detect=0"; next }
   tweaks && /^[[:space:]]*(enable_dpi_lcd|display_default_lcd|dpi_group)=/ { next }
-  tweaks && /^[[:space:]]*dtparam=fan_temp[0-3](_hyst|_fan|_speed)?=/ {
-    if (!fan_done) {
-      print "dtparam=fan_temp0=50000,fan_temp0_hyst=5000,fan_temp0_speed=125"
-      print "dtparam=fan_temp1=60000,fan_temp1_hyst=5000,fan_temp1_speed=150"
-      print "dtparam=fan_temp2=67500,fan_temp2_hyst=5000,fan_temp2_speed=175"
-      print "dtparam=fan_temp3=75000,fan_temp3_hyst=5000,fan_temp3_speed=250"
-      fan_done = 1
-    }
-    next
-  }
   { print }
   END { if (!done) exit 3 }
 ' "$CONFIG" >"$WORK/tryboot.txt" || {
